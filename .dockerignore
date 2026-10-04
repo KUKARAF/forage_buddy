@@ -1,0 +1,8 @@
+target/
+data/
+web/node_modules/
+web/build/
+web/.svelte-kit/
+crates/mobile/gen/
+.git/
+*.log
