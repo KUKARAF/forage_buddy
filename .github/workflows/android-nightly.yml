@@ -1,0 +1,173 @@
+name: Android Nightly APK
+
+# Builds an APK on every push to main that touches APK-relevant code and
+# publishes it as a rolling `nightly` pre-release (tag + release are recreated
+# each run so the tag always points at the built commit).
+#
+# It's a DEBUG build (debuggable=true) but RE-SIGNED with the release keystore.
+# Two separate reasons:
+#  * Debug build: the OIDC login redirects the webview to the cleartext URL
+#    http://tauri.localhost/#token=<...>. A release (non-debuggable) build blocks
+#    that top-level cleartext load (ERR_CLEARTEXT_NOT_PERMITTED) and login fails;
+#    a debug build permits it. So the app must be built --debug.
+#  * Release-key signature: the Android Gradle Plugin's auto-generated debug
+#    keystore is regenerated randomly on every CI run, so debug-SIGNED nightlies
+#    had a different certificate each build and Android refused to update one
+#    over another ("App not installed"). Re-signing the debug APK with the
+#    release keystore (same repo secrets as android-release.yml) gives every
+#    nightly AND tagged release one stable signing identity, so updates apply.
+#
+# See android-release.yml for why `tauri android init` runs in CI instead of
+# committing crates/mobile/gen/.
+#
+# No Firebase/FCM step here: Forage Buddy has no push-notification feature
+# (see docs/ARCHITECTURE.md - "no wallet, no Stripe, no circles, no MCP, no
+# FCM/push, no GeoIP"), unlike the ai_buddy reference project this pipeline
+# is adapted from.
+
+on:
+  workflow_dispatch: {}
+  push:
+    branches: [main]
+    paths:
+      - "crates/mobile/**"
+      - "crates/core/**"
+      - "web/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/android-nightly.yml"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: android-nightly
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build debug APK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install stable Rust with Android target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Build frontend
+        working-directory: web
+        env:
+          PUBLIC_API_BASE_URL: https://forage.osmosis.page
+          PUBLIC_APP_MODE: tauri
+        run: |
+          npm ci
+          npm run build
+
+      - name: Install Tauri CLI
+        # Prebuilt binary via cargo-binstall (seconds, vs 5-10 min for
+        # `cargo install`). Must be the cargo subcommand, NOT the npm CLI:
+        # the generated Gradle project records how the CLI was invoked and
+        # re-runs it from crates/mobile during :app:rustBuild*, and the npm
+        # global shim gets recorded as `node tauri`, which fails there
+        # ("Cannot find module .../crates/mobile/tauri"). `cargo tauri`
+        # resolves from PATH regardless of working directory.
+        run: |
+          curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash
+          cargo binstall -y 'tauri-cli@^2'
+
+      - name: Export Android NDK env
+        # ANDROID_HOME is preset by the runner image; ANDROID_NDK_LATEST_HOME
+        # is a machine env var not visible to the ${{ env }} context, so
+        # re-export it under the name the Tauri CLI expects.
+        run: echo "NDK_HOME=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
+
+      - name: Generate Android project
+        working-directory: crates/mobile
+        run: cargo tauri android init --skip-targets-install
+
+      - name: Apply the committed launcher icons
+        working-directory: crates/mobile
+        run: |
+          set -euo pipefail
+          # `tauri android init` regenerates gen/ with DEFAULT Tauri launcher
+          # icons and does NOT use crates/mobile/icons/android/. Overlay our
+          # committed icons (produced by `cargo tauri icon`) onto the generated
+          # res/ so the APK shows the real app icon, not the Tauri placeholder.
+          cp -r icons/android/. gen/android/app/src/main/res/
+
+      - name: Build debug APK (arm64)
+        working-directory: crates/mobile
+        run: cargo tauri android build --apk --debug --target aarch64
+
+      - name: Re-sign the debug APK with the release key (zipalign + apksigner)
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          OUT="forage-buddy-nightly-${GITHUB_SHA::7}.apk"
+          IN=crates/mobile/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk
+          if [ -z "$ANDROID_KEYSTORE_BASE64" ]; then
+            # No release keystore configured on this repo. Fall back to the
+            # debug-signed APK so a nightly artifact is still produced. NOTE:
+            # the Android Gradle Plugin's debug keystore is regenerated per run,
+            # so these nightlies have an unstable signing identity and Android
+            # may refuse to update one over another ("App not installed"); users
+            # must uninstall before updating. Set the ANDROID_KEYSTORE_BASE64 /
+            # ANDROID_KEYSTORE_PASSWORD / ANDROID_KEY_ALIAS / ANDROID_KEY_PASSWORD
+            # repo secrets to get stable, release-key-signed nightlies.
+            echo "::warning::Release keystore secrets not set; publishing the debug-signed APK unchanged. See android-nightly.yml for the secrets to configure."
+            cp "$IN" "$OUT"
+            exit 0
+          fi
+          # Strip the random per-run debug signature and re-sign with the stable
+          # release keystore, so every nightly shares one signing identity (see
+          # the header comment). apksigner re-signs whatever it's given.
+          BT="$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -n1)"
+          echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.keystore"
+          # zipalign must run before apksigner (apksigner preserves alignment)
+          "$BT/zipalign" -f -p 4 \
+            "$IN" \
+            "$RUNNER_TEMP/app-aligned.apk"
+          "$BT/apksigner" sign \
+            --ks "$RUNNER_TEMP/release.keystore" \
+            --ks-key-alias "$ANDROID_KEY_ALIAS" \
+            --ks-pass "pass:$ANDROID_KEYSTORE_PASSWORD" \
+            --key-pass "pass:$ANDROID_KEY_PASSWORD" \
+            --out "$OUT" \
+            "$RUNNER_TEMP/app-aligned.apk"
+          "$BT/apksigner" verify --print-certs "$OUT"
+          rm -f "$RUNNER_TEMP/release.keystore"
+
+      - name: Publish rolling nightly pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Delete + recreate so the `nightly` tag moves to the current
+          # commit; uploading over the old release would leave the tag (and
+          # the release's source snapshot) pointing at a stale commit.
+          gh release delete nightly --cleanup-tag --yes || true
+          gh release create nightly \
+            --prerelease \
+            --title "Nightly APK (${GITHUB_SHA::7})" \
+            --notes "Automated build of ${GITHUB_SHA} from main. Signed with the release key." \
+            "forage-buddy-nightly-${GITHUB_SHA::7}.apk"

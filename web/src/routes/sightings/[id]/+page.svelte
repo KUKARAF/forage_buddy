@@ -1,0 +1,544 @@
+<script lang="ts">
+	import { page } from '$app/state';
+	import {
+		getSightingDetail,
+		uploadPhoto,
+		runTriage,
+		triggerDeepDive,
+		ApiError,
+		type SightingDetail
+	} from '$lib/api/client';
+	import { relativeTime, placeOrCoords } from '$lib/format';
+	import SafetyBanner from '$lib/components/SafetyBanner.svelte';
+	import DangerBadge from '$lib/components/DangerBadge.svelte';
+	import ConfidenceBar from '$lib/components/ConfidenceBar.svelte';
+	import PhotoImg from '$lib/components/PhotoImg.svelte';
+
+	const sightingId = $derived(page.params.id as string);
+
+	let detail = $state<SightingDetail | null>(null);
+	let loading = $state(true);
+	let loadError = $state<string | null>(null);
+
+	let addPhotoInput: HTMLInputElement | undefined = $state();
+	let uploadingPhoto = $state(false);
+	let uploadError = $state<string | null>(null);
+
+	let rerunningTriage = $state(false);
+	let triageError = $state<string | null>(null);
+
+	let deepDiveLoading = $state(false);
+	let deepDiveError = $state<string | null>(null);
+
+	let lightboxPhotoId = $state<string | null>(null);
+
+	// Local-only checklist state for the deep-dive confusant features: ticking
+	// a box helps the user work through the list while re-examining their
+	// specimen, but is never sent to the backend.
+	let checklist = $state<Record<string, boolean>>({});
+
+	function checklistKey(confusantIdx: number, featureIdx: number): string {
+		return `${confusantIdx}:${featureIdx}`;
+	}
+
+	async function load() {
+		loading = true;
+		loadError = null;
+		try {
+			detail = await getSightingDetail(sightingId);
+		} catch (err) {
+			loadError = err instanceof ApiError ? err.message : 'Could not load this sighting.';
+		} finally {
+			loading = false;
+		}
+	}
+
+	$effect(() => {
+		void load();
+	});
+
+	async function onAddPhoto(e: Event) {
+		const input = e.currentTarget as HTMLInputElement;
+		const file = input.files?.[0] ?? null;
+		input.value = '';
+		if (!file || !detail) return;
+		uploadingPhoto = true;
+		uploadError = null;
+		try {
+			await uploadPhoto(detail.sighting.id, file);
+			await load();
+		} catch (err) {
+			uploadError = err instanceof ApiError ? err.message : 'Could not upload that photo.';
+		} finally {
+			uploadingPhoto = false;
+		}
+	}
+
+	async function rerunTriage() {
+		if (!detail) return;
+		rerunningTriage = true;
+		triageError = null;
+		try {
+			detail.triage = await runTriage(detail.sighting.id);
+		} catch (err) {
+			triageError = err instanceof ApiError ? err.message : 'Could not re-run triage.';
+		} finally {
+			rerunningTriage = false;
+		}
+	}
+
+	async function runDeepDive() {
+		if (!detail) return;
+		deepDiveLoading = true;
+		deepDiveError = null;
+		try {
+			detail.deepdive = await triggerDeepDive(detail.sighting.id);
+			checklist = {};
+		} catch (err) {
+			deepDiveError = err instanceof ApiError ? err.message : 'Deep dive failed. Please try again.';
+		} finally {
+			deepDiveLoading = false;
+		}
+	}
+
+	const canRunDeepDive = $derived(
+		detail?.triage !== null &&
+			detail?.triage !== undefined &&
+			detail.triage.status !== 'insufficient'
+	);
+</script>
+
+<svelte:head>
+	<title>Sighting — Forage Buddy</title>
+</svelte:head>
+
+{#if loading}
+	<p class="muted">Loading sighting…</p>
+{:else if loadError}
+	<div class="card error">
+		<p>{loadError}</p>
+		<button class="btn secondary" onclick={load}>Try again</button>
+	</div>
+{:else if detail}
+	<SafetyBanner />
+
+	<div class="header-row">
+		<div>
+			<h1>Sighting</h1>
+			<p class="muted">
+				{relativeTime(detail.sighting.observed_at)}
+				{#if placeOrCoords(detail.sighting.place_label, detail.sighting.lat, detail.sighting.lon)}
+					· {placeOrCoords(detail.sighting.place_label, detail.sighting.lat, detail.sighting.lon)}
+				{/if}
+			</p>
+		</div>
+	</div>
+
+	{#if detail.sighting.notes}
+		<p class="notes">{detail.sighting.notes}</p>
+	{/if}
+
+	<section class="card">
+		<h2>Photos</h2>
+		<div class="gallery">
+			{#each detail.photos as photo (photo.id)}
+				<button class="thumb-btn" onclick={() => (lightboxPhotoId = photo.id)}>
+					<PhotoImg photoId={photo.id} alt="Specimen photo" class="thumb-img" />
+				</button>
+			{/each}
+		</div>
+		<input
+			bind:this={addPhotoInput}
+			type="file"
+			accept="image/*"
+			capture="environment"
+			class="visually-hidden"
+			onchange={onAddPhoto}
+		/>
+		<button class="btn secondary" disabled={uploadingPhoto} onclick={() => addPhotoInput?.click()}>
+			{uploadingPhoto ? 'Uploading…' : '+ Add another photo'}
+		</button>
+		{#if uploadError}
+			<p class="error-text">{uploadError}</p>
+		{/if}
+	</section>
+
+	<section class="card">
+		<div class="card-head">
+			<h2>Triage</h2>
+			<button class="btn secondary small-btn" disabled={rerunningTriage} onclick={rerunTriage}>
+				{rerunningTriage ? 'Re-running…' : 'Re-run triage'}
+			</button>
+		</div>
+
+		{#if !detail.triage}
+			<p class="muted">
+				No triage result yet — it runs automatically right after a photo upload. Try "Re-run triage"
+				if it's been a moment.
+			</p>
+		{:else if detail.triage.status === 'insufficient'}
+			<div class="missing-info">
+				<p class="missing-head">📸 We need a bit more to go on:</p>
+				<ul>
+					{#each detail.triage.missing_info as ask (ask)}
+						<li>{ask}</li>
+					{/each}
+				</ul>
+			</div>
+			<p class="muted small reasoning">{detail.triage.reasoning}</p>
+		{:else}
+			<ul class="candidates">
+				{#each detail.triage.candidate_species as candidate (candidate.species)}
+					<li>
+						<div class="candidate-name">
+							<strong>{candidate.species}</strong>
+							{#if candidate.common_name}<span class="muted">({candidate.common_name})</span>{/if}
+						</div>
+						<ConfidenceBar confidence={candidate.confidence} />
+					</li>
+				{/each}
+			</ul>
+			<p class="muted small reasoning">{detail.triage.reasoning}</p>
+		{/if}
+
+		{#if triageError}
+			<p class="error-text">{triageError}</p>
+		{/if}
+
+		<div class="deepdive-trigger">
+			<button
+				class="btn"
+				disabled={!canRunDeepDive || deepDiveLoading}
+				title={!canRunDeepDive
+					? 'Needs at least a genus candidate before a deep dive makes sense'
+					: ''}
+				onclick={runDeepDive}
+			>
+				{deepDiveLoading
+					? 'Running deep dive…'
+					: detail.deepdive
+						? 'Re-run deep dive'
+						: 'Run deep dive'}
+			</button>
+		</div>
+	</section>
+
+	{#if deepDiveLoading}
+		<section class="card deepdive-loading">
+			<div class="spinner" aria-hidden="true"></div>
+			<p>Checking Wikipedia and known look-alikes… this can take a little while.</p>
+		</section>
+	{:else if deepDiveError}
+		<section class="card error">
+			<p>{deepDiveError}</p>
+		</section>
+	{:else if detail.deepdive}
+		{@const dd = detail.deepdive}
+		<section class="card deepdive">
+			<h2>Deep dive</h2>
+			<SafetyBanner />
+
+			<div class="best-match">
+				<strong>{dd.best_match_species}</strong>
+				<ConfidenceBar confidence={dd.confidence} />
+			</div>
+
+			{#if dd.wikipedia_extract}
+				<div class="wiki">
+					<p>{dd.wikipedia_extract}</p>
+					{#if dd.wikipedia_url}
+						<a href={dd.wikipedia_url} target="_blank" rel="noopener noreferrer external"
+							>Read more on Wikipedia →</a
+						>
+					{/if}
+				</div>
+			{/if}
+
+			{#if dd.confusants.length > 0}
+				<h3>⚠️ Could be confused with</h3>
+				<ul class="confusants">
+					{#each dd.confusants as confusant, ci (confusant.species)}
+						<li
+							class="confusant level-{confusant.danger_level}"
+							class:alarming={confusant.danger_level === 'deadly_toxic'}
+						>
+							<div class="confusant-head">
+								<div>
+									<strong>{confusant.species}</strong>
+									{#if confusant.common_name}<span class="muted">
+											({confusant.common_name})</span
+										>{/if}
+								</div>
+								<DangerBadge level={confusant.danger_level} />
+							</div>
+							{#if confusant.notes}
+								<p class="confusant-notes">{confusant.notes}</p>
+							{/if}
+							{#if confusant.distinguishing_features.length > 0}
+								<p class="checklist-label muted small">Check to rule out:</p>
+								<ul class="checklist">
+									{#each confusant.distinguishing_features as feature, fi (feature)}
+										<li>
+											<label>
+												<input
+													type="checkbox"
+													checked={checklist[checklistKey(ci, fi)] ?? false}
+													onchange={(e) =>
+														(checklist[checklistKey(ci, fi)] = (
+															e.currentTarget as HTMLInputElement
+														).checked)}
+												/>
+												{feature}
+											</label>
+										</li>
+									{/each}
+								</ul>
+							{/if}
+						</li>
+					{/each}
+				</ul>
+			{/if}
+
+			<p class="safety-notes muted small">{dd.safety_notes}</p>
+		</section>
+	{/if}
+
+	{#if lightboxPhotoId}
+		<div
+			class="lightbox"
+			role="button"
+			tabindex="0"
+			aria-label="Close full-size photo"
+			onclick={() => (lightboxPhotoId = null)}
+			onkeydown={(e) => e.key === 'Escape' && (lightboxPhotoId = null)}
+		>
+			<PhotoImg photoId={lightboxPhotoId} alt="Full-size specimen photo" class="lightbox-img" />
+		</div>
+	{/if}
+{/if}
+
+<style>
+	.header-row {
+		margin-bottom: 8px;
+	}
+	.notes {
+		background: var(--tag-bg);
+		border-radius: var(--radius-btn);
+		padding: 10px 12px;
+		margin-bottom: 16px;
+	}
+
+	.card {
+		margin-bottom: 18px;
+	}
+	.card-head {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 10px;
+	}
+	.card.error {
+		border-color: var(--red);
+		background: var(--red-bg);
+	}
+
+	.gallery {
+		display: grid;
+		grid-template-columns: repeat(auto-fill, minmax(84px, 1fr));
+		gap: 8px;
+		margin-bottom: 14px;
+	}
+	.thumb-btn {
+		border: none;
+		background: var(--tag-bg);
+		border-radius: 10px;
+		overflow: hidden;
+		aspect-ratio: 1;
+		padding: 0;
+	}
+	.thumb-btn :global(.thumb-img) {
+		width: 100%;
+		height: 100%;
+		object-fit: cover;
+	}
+
+	.visually-hidden {
+		position: absolute;
+		width: 1px;
+		height: 1px;
+		overflow: hidden;
+		clip: rect(0 0 0 0);
+	}
+
+	.small-btn {
+		min-height: 36px;
+		padding: 6px 12px;
+		font-size: 13px;
+	}
+	.small {
+		font-size: 12.5px;
+	}
+
+	.missing-info {
+		background: var(--grey-bg);
+		border-radius: var(--radius-btn);
+		padding: 12px 14px;
+	}
+	.missing-head {
+		font-weight: 700;
+		margin-bottom: 6px;
+	}
+	.missing-info ul {
+		margin: 0;
+		padding-left: 20px;
+	}
+	.reasoning {
+		margin-top: 10px;
+	}
+
+	.candidates {
+		list-style: none;
+		margin: 0 0 10px;
+		padding: 0;
+		display: flex;
+		flex-direction: column;
+		gap: 12px;
+	}
+	.candidate-name {
+		margin-bottom: 4px;
+	}
+
+	.deepdive-trigger {
+		margin-top: 14px;
+	}
+
+	.deepdive-loading {
+		display: flex;
+		align-items: center;
+		gap: 14px;
+	}
+	.spinner {
+		width: 28px;
+		height: 28px;
+		flex: none;
+		border-radius: 999px;
+		border: 3px solid var(--line);
+		border-top-color: var(--moss);
+		animation: spin 0.8s linear infinite;
+	}
+	@keyframes spin {
+		to {
+			transform: rotate(360deg);
+		}
+	}
+
+	.deepdive h3 {
+		margin-top: 18px;
+	}
+	.best-match {
+		margin-bottom: 14px;
+	}
+	.wiki {
+		margin-bottom: 14px;
+	}
+	.wiki a {
+		color: var(--forest);
+		font-weight: 600;
+	}
+
+	.confusants {
+		list-style: none;
+		margin: 0;
+		padding: 0;
+		display: flex;
+		flex-direction: column;
+		gap: 10px;
+	}
+	.confusant {
+		border-radius: var(--radius-btn);
+		border: 1px solid var(--line);
+		border-left: 6px solid var(--grey);
+		padding: 12px 14px;
+		background: var(--card);
+	}
+	.confusant.level-unknown {
+		border-left-color: var(--grey);
+	}
+	.confusant.level-safe {
+		border-left-color: var(--green);
+	}
+	.confusant.level-caution {
+		border-left-color: var(--amber);
+	}
+	.confusant.level-toxic {
+		border-left-color: var(--orange);
+	}
+	.confusant.level-deadly_toxic {
+		border-left-color: var(--red);
+	}
+	.confusant.alarming {
+		background: var(--red-bg);
+		box-shadow: 0 0 0 1px var(--red) inset;
+	}
+	.confusant-head {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 10px;
+	}
+	.confusant-notes {
+		margin: 8px 0 4px;
+	}
+	.checklist-label {
+		margin: 8px 0 4px;
+	}
+	.checklist {
+		list-style: none;
+		margin: 0;
+		padding: 0;
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+	}
+	.checklist label {
+		display: flex;
+		align-items: flex-start;
+		gap: 8px;
+		font-weight: 400;
+	}
+	.checklist input {
+		margin-top: 3px;
+		width: 18px;
+		height: 18px;
+		flex: none;
+	}
+
+	.safety-notes {
+		margin-top: 16px;
+		border-top: 1px solid var(--line);
+		padding-top: 10px;
+	}
+
+	.error-text {
+		color: var(--red);
+		font-size: 13.5px;
+		margin: 6px 0;
+	}
+
+	.lightbox {
+		position: fixed;
+		inset: 0;
+		background: rgba(10, 15, 8, 0.86);
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		padding: 24px;
+		z-index: 50;
+	}
+	.lightbox :global(.lightbox-img) {
+		max-width: 100%;
+		max-height: 100%;
+		object-fit: contain;
+		border-radius: 8px;
+	}
+</style>

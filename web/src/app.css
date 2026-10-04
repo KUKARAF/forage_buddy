@@ -1,0 +1,172 @@
+/* Forage Buddy — global design tokens + base styles.
+   Fully self-contained: system font stack, no external fonts/CDNs/images.
+   Earthy/green palette, kept deliberately simple: this is a field tool used
+   in bright sunlight with gloved/wet hands, so contrast and tap-target size
+   matter more than visual polish. */
+
+:root {
+	--bg: #f7f6f0;
+	--ink: #23301f;
+	--muted: #6b6f5f;
+	--line: #ddddc9;
+	--card: #ffffff;
+	--tag-bg: #eef0e2;
+
+	/* brand greens */
+	--forest: #2f5233;
+	--moss: #4f7942;
+	--leaf: #7fa650;
+	--leaf-ink: #2f5233;
+
+	/* danger-level scale (also used for status badges) */
+	--grey: #8a8f82;
+	--grey-bg: #ecece4;
+	--green: #2f7d3a;
+	--green-bg: #e1f1df;
+	--amber: #9a6b11;
+	--amber-bg: #faecc8;
+	--orange: #b5540f;
+	--orange-bg: #fbe3d0;
+	--red: #a4121f;
+	--red-bg: #fbd6d9;
+
+	--radius-card: 14px;
+	--radius-btn: 10px;
+
+	--shadow: 0 1px 2px rgba(35, 48, 31, 0.06), 0 2px 8px rgba(35, 48, 31, 0.08);
+
+	--font: -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+
+	/* Safe-area insets (status bar / notch / nav bar) for the Tauri Android
+	   webview; fall back to 0px on the plain web build. */
+	--safe-top: max(env(safe-area-inset-top, 0px), var(--safe-area-inset-top, 0px));
+	--safe-right: max(env(safe-area-inset-right, 0px), var(--safe-area-inset-right, 0px));
+	--safe-bottom: max(env(safe-area-inset-bottom, 0px), var(--safe-area-inset-bottom, 0px));
+	--safe-left: max(env(safe-area-inset-left, 0px), var(--safe-area-inset-left, 0px));
+}
+
+* {
+	box-sizing: border-box;
+}
+
+html,
+body {
+	margin: 0;
+	padding: 0;
+	max-width: 100%;
+	overflow-x: hidden;
+}
+
+body {
+	font-family: var(--font);
+	color: var(--ink);
+	background: var(--bg);
+	-webkit-font-smoothing: antialiased;
+	line-height: 1.5;
+	font-size: 16px;
+}
+
+a {
+	color: inherit;
+}
+
+h1,
+h2,
+h3 {
+	line-height: 1.25;
+	margin: 0 0 8px;
+}
+
+p {
+	margin: 0 0 8px;
+}
+
+button,
+input,
+textarea,
+select {
+	font-family: inherit;
+	font-size: 16px;
+}
+
+button {
+	cursor: pointer;
+}
+
+button:disabled {
+	opacity: 0.55;
+	cursor: not-allowed;
+}
+
+.btn {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	gap: 8px;
+	min-height: 44px;
+	padding: 10px 18px;
+	border-radius: var(--radius-btn);
+	border: 1px solid transparent;
+	font-weight: 600;
+	background: var(--forest);
+	color: #fff;
+}
+
+.btn:hover:not(:disabled) {
+	background: var(--moss);
+}
+
+.btn.secondary {
+	background: var(--card);
+	color: var(--forest);
+	border-color: var(--line);
+}
+
+.btn.secondary:hover:not(:disabled) {
+	background: var(--tag-bg);
+}
+
+.btn.danger {
+	background: var(--red);
+}
+
+.card {
+	background: var(--card);
+	border: 1px solid var(--line);
+	border-radius: var(--radius-card);
+	box-shadow: var(--shadow);
+	padding: 18px;
+}
+
+input[type='text'],
+input[type='number'],
+input[type='datetime-local'],
+textarea {
+	width: 100%;
+	min-height: 44px;
+	padding: 10px 12px;
+	border: 1px solid var(--line);
+	border-radius: var(--radius-btn);
+	background: #fff;
+	color: var(--ink);
+}
+
+textarea {
+	min-height: 88px;
+	resize: vertical;
+}
+
+label {
+	display: block;
+	font-weight: 600;
+	font-size: 14px;
+	margin-bottom: 6px;
+}
+
+.field {
+	margin-bottom: 18px;
+}
+
+.muted {
+	color: var(--muted);
+}

@@ -1,0 +1,94 @@
+name: CI (required)
+
+# BLOCKING pipeline - a merge request cannot be merged while this fails.
+#
+# The Rust job's panic-safety gate exists because of "Rust: Don't Panic"
+# (No Boilerplate, https://www.youtube.com/watch?v=usRlRCNIOG0 - see
+# rust-advice.md for the transcript). Chapter 9 of the Rust book names three
+# ways Rust code crashes at runtime:
+#   1. explicit panicking (`panic!`, and `.unwrap()`/`.expect()`, which
+#      panic internally)
+#   2. implicit panicking (e.g. indexing/slicing past the end of a
+#      collection)
+#   3. unwrapping an `Err`/`None` without handling it
+# The video's advice: "the solution is to get the local tooling and remote
+# CI to throw out all code that can crash." That's exactly what this job
+# does - it's not optional style preference, it's the merge gate.
+#
+# The specific lints (clippy::unwrap_used, expect_used, panic, todo,
+# unimplemented, unreachable, indexing_slicing) are declared `deny` in the
+# root Cargo.toml's [workspace.lints.clippy] - this workflow doesn't
+# hardcode them, it just runs `cargo clippy` and lets that config do the
+# enforcing, so the source of truth for "what's a blocking violation" lives
+# in one place, not duplicated between the repo and the pipeline.
+#
+# Deliberately scoped to `--lib --bins` (production code only), not
+# `--all-targets`: unlike unwrap/expect/panic, `indexing_slicing` has no
+# "allow in tests" knob in clippy.toml, so linting test code with it produces
+# noise unrelated to runtime safety. This matches the video's own point that
+# "unwraps are allowed in tests" - the gate is about what ships, not test
+# code, which the video explicitly treats as a legitimate place to
+# prototype without ceremony.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+    # Safety net for the period before branch protection is fully turned on
+    # (see the note in the repo about wanting to disallow direct pushes to
+    # main and only allow merges from feature branches) - once that's
+    # enforced on GitHub's side, direct pushes to main can't happen at all
+    # and this trigger becomes moot rather than harmful.
+
+concurrency:
+  group: ci-required-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    name: Rust (fmt, build, test, panic-safety clippy)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Install libgit2 build deps
+        run: sudo apt-get update && sudo apt-get install -y cmake libssl-dev pkg-config
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo fmt --check
+        run: cargo fmt --all --check
+
+      - name: cargo build
+        run: cargo build --workspace --exclude mobile
+
+      - name: cargo test
+        run: cargo test --workspace --exclude mobile
+
+      - name: cargo clippy (panic-safety gate, production code only)
+        run: cargo clippy -p server -p forage-buddy-core --lib --bins -- -D warnings
+
+  frontend:
+    name: Frontend (check, build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - run: npm ci
+      - run: npm run check
+      - run: npm run build

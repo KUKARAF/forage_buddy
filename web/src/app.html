@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+
+		<title>Forage Buddy</title>
+
+		<!-- Security: safe, host-independent meta tags. -->
+		<meta name="referrer" content="strict-origin-when-cross-origin" />
+
+		<!--
+			Content-Security-Policy is intentionally NOT set as a <meta http-equiv>
+			here. The Rust server sets the CSP (and other security headers) on EVERY
+			response — including this static SPA shell — via a response-header
+			middleware. The Tauri APK build sets its own CSP in
+			crates/mobile/tauri.conf.json (its connect-src also allows the remote
+			backend origin).
+
+			Why it is not a <meta> tag: the SvelteKit static build emits an inline
+			bootstrap <script> with no nonce, and connect-src must allow the
+			(build-time-unknown) backend origin from PUBLIC_API_BASE_URL.
+		-->
+
+		%sveltekit.head%
+	</head>
+	<body data-sveltekit-preload-data="hover">
+		<div style="display: contents">%sveltekit.body%</div>
+	</body>
+</html>

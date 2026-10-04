@@ -74,7 +74,10 @@ mod tests {
             Some(TriageStatus::GenusCandidate)
         );
         assert_eq!(TriageStatus::GenusCandidate.as_str(), "genus_candidate");
-        assert_eq!(DangerLevel::parse("deadly_toxic"), Some(DangerLevel::DeadlyToxic));
+        assert_eq!(
+            DangerLevel::parse("deadly_toxic"),
+            Some(DangerLevel::DeadlyToxic)
+        );
         assert_eq!(SightingStatus::parse("nope"), None);
     }
 

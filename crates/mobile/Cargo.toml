@@ -1,0 +1,63 @@
+[package]
+name = "mobile"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+name = "forage_buddy_mobile"
+crate-type = ["staticlib", "cdylib", "lib"]
+path = "src/lib.rs"
+
+[dependencies]
+forage-buddy-core = { workspace = true }
+tauri = { workspace = true }
+# Required in scope by `tauri::generate_context!` codegen once a `plugins`
+# config section exists (the deep-link config is deserialized via serde_json).
+serde_json = { workspace = true }
+
+# Injects the Android system-bar insets as CSS variables
+# (--safe-area-inset-*) on the webview's documentElement — the Android
+# System WebView doesn't reliably plumb env(safe-area-inset-*) (returns 0
+# before WebView 140), and the generated gen/android project can't be
+# customized (CI regenerates it), so a plugin is the only persistable fix.
+# Pinned exactly: young single-maintainer crate; its published permission
+# set is broken (references a nonexistent `ping` command), so it must NOT
+# be listed in capabilities/ — the CSS injection is automatic on load and
+# needs no permissions.
+tauri-plugin-edge-to-edge = "=0.3.3"
+
+# NOTE: unlike ai_buddy/rust_note, Forage Buddy has no directory-picker /
+# push-notification features (see docs/ARCHITECTURE.md: "no wallet, no
+# Stripe, no circles, no MCP, no FCM/push, no GeoIP"), so neither
+# `tauri-plugin-android-fs` nor `tauri-plugin-notifications` is a
+# dependency here. Keep it that small.
+
+# OIDC login: open the OS browser (opener) for the OAuth flow and receive the
+# device token back via the `dev.foragebuddy.app://auth` custom-scheme deep
+# link (deep-link). Keep in lockstep with the @tauri-apps/plugin-* npm
+# packages.
+tauri-plugin-deep-link = "2.4.9"
+tauri-plugin-opener = "2.5.4"
+
+# Native geolocation for the capture flow (`/sightings/new` reads lat/lon to
+# tag each sighting — season/geography narrow the triage candidates a lot).
+# Matches the frontend's `@tauri-apps/plugin-geolocation`; keep the Cargo and
+# npm package versions in lockstep the same way deep-link/opener are above.
+# The Android permissions (ACCESS_FINE_LOCATION / ACCESS_COARSE_LOCATION) are
+# declared in the plugin's own AndroidManifest fragment and merged into the
+# generated gen/android project automatically — no manual manifest edit
+# needed here (verify against the plugin's README if it's ever bumped).
+#
+# No camera capability/dependency: the frontend uses a plain
+# `<input type="file" accept="image/*" capture="environment">` element,
+# which hands off to the system camera app via an Android intent. The
+# camera permission belongs to (and is already held by) that system app,
+# not this one, so no `android.permission.CAMERA` manifest entry or Tauri
+# capability is needed on our side.
+tauri-plugin-geolocation = "2"
+
+[build-dependencies]
+tauri-build = { version = "2" }

@@ -1,0 +1,43 @@
+services:
+  foragebuddy:
+    # Published by .github/workflows/docker-publish.yml on every main push.
+    # First-time setup: the GHCR package starts private — make it public once
+    # (GitHub -> Packages -> forage_buddy -> package settings) or `docker
+    # login ghcr.io` on this host with a read:packages token.
+    image: ghcr.io/kukaraf/forage_buddy:latest
+    container_name: foragebuddy
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # CHANGE ME: a reasonable guess at the subdomain convention this
+      # project's Authentik/Caddy instance already uses (see ai_buddy ->
+      # buddy.osmosis.page). Point this at wherever the Caddy entry for this
+      # container actually ends up (that reverse-proxy wiring is a manual
+      # step - see the README's "Manual steps before this is live" section).
+      - FORAGEBUDDY_BASE_URL=https://forage.osmosis.page
+      - FORAGEBUDDY_AUTHENTIK_ISSUER_URL=https://auth.osmosis.page/application/o/forage-buddy/
+      # Placeholder - fill in after creating the "forage-buddy" OIDC
+      # application in Authentik (see README). Until then, either leave this
+      # unset and set FORAGEBUDDY_DEV_MODE=true in .env for zero-setup local
+      # use, or fill it in for a real deployment.
+      - FORAGEBUDDY_OIDC_CLIENT_ID=REPLACE_ME
+      - FORAGEBUDDY_OIDC_REDIRECT_URI=https://forage.osmosis.page/auth/callback
+      # No FORAGEBUDDY_OIDC_CLIENT_SECRET: this Authentik provider is a Public
+      # client (PKCE-only, no shared secret), matching ai_buddy's pattern.
+      - FORAGEBUDDY_SQLITE_PATH=/data/db/forage_buddy.db
+      - FORAGEBUDDY_PHOTO_DIR=/data/photos
+    volumes:
+      - foragebuddy_db:/data/db
+      - foragebuddy_photos:/data/photos
+    networks:
+      - proxy
+
+networks:
+  proxy:
+    external: true
+    name: caddy_proxy
+
+volumes:
+  foragebuddy_db:
+  foragebuddy_photos:

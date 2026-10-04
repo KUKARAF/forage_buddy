@@ -71,8 +71,9 @@ impl Config {
             .unwrap_or_else(|_| DEV_DEFAULT_BASE_URL.to_string());
 
         Self {
-            authentik_issuer_url: std::env::var("FORAGEBUDDY_AUTHENTIK_ISSUER_URL")
-                .unwrap_or_else(|_| "http://localhost:9000/application/o/forage-buddy/".to_string()),
+            authentik_issuer_url: std::env::var("FORAGEBUDDY_AUTHENTIK_ISSUER_URL").unwrap_or_else(
+                |_| "http://localhost:9000/application/o/forage-buddy/".to_string(),
+            ),
             oidc_client_id: std::env::var("FORAGEBUDDY_OIDC_CLIENT_ID")
                 .unwrap_or_else(|_| "forage-buddy-dev".to_string()),
             oidc_client_secret: std::env::var("FORAGEBUDDY_OIDC_CLIENT_SECRET")
@@ -89,13 +90,13 @@ impl Config {
                 .unwrap_or_else(|_| "./data/photos".to_string()),
             bind_addr: std::env::var("FORAGEBUDDY_BIND_ADDR")
                 .unwrap_or_else(|_| "127.0.0.1:8080".to_string()),
-            cookie_secure: std::env::var("FORAGEBUDDY_COOKIE_SECURE").ok().and_then(|v| {
-                match v.trim().to_ascii_lowercase().as_str() {
+            cookie_secure: std::env::var("FORAGEBUDDY_COOKIE_SECURE")
+                .ok()
+                .and_then(|v| match v.trim().to_ascii_lowercase().as_str() {
                     "true" | "1" | "yes" => Some(true),
                     "false" | "0" | "no" => Some(false),
                     _ => None,
-                }
-            }),
+                }),
             dev_mode: std::env::var("FORAGEBUDDY_ENV").as_deref() == Ok("dev")
                 || std::env::var("FORAGEBUDDY_DEV_MODE").as_deref() == Ok("true"),
             cors_allowed_origins: std::env::var("FORAGEBUDDY_CORS_ORIGINS")

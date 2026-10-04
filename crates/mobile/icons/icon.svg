@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <defs>
+    <radialGradient id="bg" cx="34%" cy="28%" r="85%">
+      <stop offset="0%" stop-color="#2a1c0f"/>
+      <stop offset="55%" stop-color="#1a130c"/>
+      <stop offset="100%" stop-color="#0e0b07"/>
+    </radialGradient>
+    <pattern id="scan" width="1024" height="8" patternUnits="userSpaceOnUse">
+      <rect width="1024" height="1" fill="#000" opacity="0.35"/>
+    </pattern>
+    <filter id="glow" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="22" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+  <rect x="0" y="0" width="1024" height="1024" rx="224" fill="url(#bg)"/>
+  <rect x="0" y="0" width="1024" height="1024" rx="224" fill="url(#scan)" opacity="0.5"/>
+  <g stroke-linecap="round">
+    <line x1="276" y1="340" x2="332" y2="340" stroke="#8a5a2b" stroke-width="52" opacity="0.55"/>
+    <line x1="392" y1="340" x2="748" y2="340" stroke="#8a5a2b" stroke-width="52" opacity="0.55"/>
+    <line x1="276" y1="512" x2="332" y2="512" stroke="#c47a34" stroke-width="52" opacity="0.8"/>
+    <line x1="392" y1="512" x2="700" y2="512" stroke="#c47a34" stroke-width="52" opacity="0.8"/>
+    <g filter="url(#glow)">
+      <line x1="276" y1="684" x2="332" y2="684" stroke="#ffb454" stroke-width="52"/>
+      <line x1="392" y1="684" x2="628" y2="684" stroke="#ffb454" stroke-width="52"/>
+      <rect x="666" y="656" width="112" height="56" rx="10" fill="#fff3d6"/>
+    </g>
+  </g>
+</svg>

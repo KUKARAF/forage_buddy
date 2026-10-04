@@ -1,0 +1,13 @@
+{
+  "$schema": "https://schema.tauri.app/capabilities/2",
+  "identifier": "default",
+  "description": "Default permissions for the Forage Buddy Android app. Note: tauri-plugin-edge-to-edge is deliberately absent - its published permission set is broken (references a nonexistent command) and its CSS-variable injection is automatic, needing no permissions. No camera permission either: photo capture uses a plain HTML <input type=\"file\" capture> element, which Android's webview hands off to the system camera app via an intent - that needs no permission grant from this app.",
+  "windows": ["main"],
+  "platforms": ["android"],
+  "permissions": [
+    "core:default",
+    "deep-link:default",
+    "opener:default",
+    "geolocation:default"
+  ]
+}

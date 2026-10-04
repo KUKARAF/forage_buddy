@@ -14,8 +14,8 @@ use crate::auth;
 use crate::deepdive;
 use crate::photos;
 use crate::sightings;
-use crate::triage;
 use crate::state::AppState;
+use crate::triage;
 
 /// Headroom added on top of `Config::max_photo_bytes` for multipart framing
 /// overhead (field boundaries, headers) when a photo upload is the request.
