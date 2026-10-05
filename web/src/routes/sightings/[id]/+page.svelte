@@ -14,6 +14,7 @@
 	import ConfidenceBar from '$lib/components/ConfidenceBar.svelte';
 	import PhotoImg from '$lib/components/PhotoImg.svelte';
 	import CameraCapture from '$lib/components/CameraCapture.svelte';
+	import { IS_APP } from '$lib/api/deviceToken';
 
 	const sightingId = $derived(page.params.id as string);
 
@@ -22,6 +23,7 @@
 	let loadError = $state<string | null>(null);
 
 	let addPhotoInput: HTMLInputElement | undefined = $state();
+	let galleryInput: HTMLInputElement | undefined = $state();
 	let uploadingPhoto = $state(false);
 	let uploadError = $state<string | null>(null);
 
@@ -88,7 +90,16 @@
 		await uploadFiles(files);
 	}
 
+	// See the matching comment in sightings/new/+page.svelte: getUserMedia
+	// never actually works in the Android app's WebView, and trying it first
+	// means the file-input fallback fires outside the original tap's trusted
+	// user-gesture window, which some WebViews silently refuse to honor — so
+	// the app build skips straight to the reliable `<input capture>` handoff.
 	function openCamera() {
+		if (IS_APP) {
+			addPhotoInput?.click();
+			return;
+		}
 		cameraUnavailableMessage = null;
 		cameraOpen = true;
 	}
@@ -181,10 +192,9 @@
 				</button>
 			{/each}
 		</div>
-		<!-- Automatic fallback when getUserMedia is unavailable/denied, and a
-		     direct "pick from gallery" option either way. `multiple` lets a
-		     browser/device that supports multi-select-from-gallery queue
-		     several at once in a single upload batch. -->
+		<!-- Camera-preferring input: the Android app's primary capture path
+		     (triggered directly, synchronously, from openCamera below), and the
+		     web build's automatic fallback when getUserMedia is unavailable/denied. -->
 		<input
 			bind:this={addPhotoInput}
 			type="file"
@@ -194,13 +204,18 @@
 			class="visually-hidden"
 			onchange={onAddPhoto}
 		/>
+		<!-- Gallery/file picker, no camera hint. -->
+		<input
+			bind:this={galleryInput}
+			type="file"
+			accept="image/*"
+			multiple
+			class="visually-hidden"
+			onchange={onAddPhoto}
+		/>
 		<div class="capture-actions">
 			<button class="btn" disabled={uploadingPhoto} onclick={openCamera}> 📷 Take a photo </button>
-			<button
-				class="btn secondary"
-				disabled={uploadingPhoto}
-				onclick={() => addPhotoInput?.click()}
-			>
+			<button class="btn secondary" disabled={uploadingPhoto} onclick={() => galleryInput?.click()}>
 				{uploadingPhoto ? 'Uploading…' : '🖼️ Choose photo(s)'}
 			</button>
 		</div>

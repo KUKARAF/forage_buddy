@@ -18,14 +18,57 @@ export class GeolocationError extends Error {}
 
 const IS_TAURI_MODE = (import.meta.env.PUBLIC_APP_MODE as string | undefined) === 'tauri';
 
+/** Turn whatever the plugin rejected with into a readable message. Both
+ * `checkPermissions`/`requestPermissions` and `getCurrentPosition` reject
+ * outright (not just resolve with a "denied" status) when the device's
+ * system-wide Location Services/GPS toggle is off — a different switch than
+ * this app's own permission, and the single most likely reason "the app has
+ * Location permission granted but still can't get a position" happens. */
+function describeTauriGeoFailure(cause: unknown): string {
+	const raw = cause instanceof Error ? cause.message : String(cause);
+	if (/location.{0,20}(disabled|off|service)/i.test(raw) || /service.{0,20}disabled/i.test(raw)) {
+		return 'Location services are turned off on this device — enable Location in your phone’s quick settings (not just this app’s permission), then try again.';
+	}
+	return raw || 'Could not get your location.';
+}
+
 async function getPositionTauri(): Promise<GeoResult> {
-	const { getCurrentPosition } = await import('@tauri-apps/plugin-geolocation');
-	const pos = await getCurrentPosition();
-	return {
-		lat: pos.coords.latitude,
-		lon: pos.coords.longitude,
-		accuracyM: pos.coords.accuracy ?? null
-	};
+	const { checkPermissions, requestPermissions, getCurrentPosition } =
+		await import('@tauri-apps/plugin-geolocation');
+
+	let status: Awaited<ReturnType<typeof checkPermissions>>;
+	try {
+		status = await checkPermissions();
+	} catch (cause) {
+		throw new GeolocationError(describeTauriGeoFailure(cause));
+	}
+	if (status.location !== 'granted' && status.coarseLocation !== 'granted') {
+		try {
+			status = await requestPermissions(['location']);
+		} catch (cause) {
+			throw new GeolocationError(describeTauriGeoFailure(cause));
+		}
+		if (status.location !== 'granted' && status.coarseLocation !== 'granted') {
+			throw new GeolocationError(
+				'Location permission was denied. Enable it for Forage Buddy in your phone’s app settings.'
+			);
+		}
+	}
+
+	try {
+		const pos = await getCurrentPosition({
+			enableHighAccuracy: true,
+			timeout: 15000,
+			maximumAge: 0
+		});
+		return {
+			lat: pos.coords.latitude,
+			lon: pos.coords.longitude,
+			accuracyM: pos.coords.accuracy ?? null
+		};
+	} catch (cause) {
+		throw new GeolocationError(describeTauriGeoFailure(cause));
+	}
 }
 
 function getPositionBrowser(): Promise<GeoResult> {

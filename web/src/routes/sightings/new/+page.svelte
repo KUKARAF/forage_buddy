@@ -3,6 +3,7 @@
 	import { goto } from '$app/navigation';
 	import { resolve } from '$app/paths';
 	import { createSighting, uploadPhoto, ApiError } from '$lib/api/client';
+	import { IS_APP } from '$lib/api/deviceToken';
 	import { getCurrentLocation, GeolocationError, type GeoResult } from '$lib/app/geolocation';
 	import { datetimeLocalToRfc3339, nowAsDatetimeLocal } from '$lib/format';
 	import CameraCapture from '$lib/components/CameraCapture.svelte';
@@ -28,6 +29,7 @@
 	let cameraOpen = $state(false);
 	let cameraUnavailableMessage = $state<string | null>(null);
 	let fallbackInput: HTMLInputElement | undefined = $state();
+	let galleryInput: HTMLInputElement | undefined = $state();
 
 	function addFiles(files: File[]) {
 		for (const file of files) {
@@ -42,7 +44,24 @@
 		pendingPhotos.splice(idx, 1);
 	}
 
+	// In the Android app, `getUserMedia` never actually works (the Tauri
+	// Android WebView doesn't bridge its permission prompt to a real Android
+	// runtime grant — see docs/ARCHITECTURE.md / the camera-UX follow-up
+	// notes), so trying it first and falling back to the file input only
+	// AFTER an async rejection is worse than useless there: by the time the
+	// rejection lands, the click that opened this is no longer a "trusted"
+	// synchronous user gesture, and some WebViews silently refuse to honor a
+	// programmatic `.click()` on a file input outside that window — which is
+	// exactly what "the camera button does nothing" looks like. So in the
+	// app build, skip the live-camera attempt entirely and go straight to
+	// the proven-reliable `<input capture>` system-camera handoff, triggered
+	// synchronously from the real tap. The web build still gets the nicer
+	// in-app live camera, where getUserMedia works normally.
 	function openCamera() {
+		if (IS_APP) {
+			fallbackInput?.click();
+			return;
+		}
 		cameraUnavailableMessage = null;
 		cameraOpen = true;
 	}
@@ -158,21 +177,30 @@
 
 		<div class="capture-actions">
 			<button type="button" class="btn" onclick={openCamera}>📷 Take a photo</button>
-			<button type="button" class="btn secondary" onclick={() => fallbackInput?.click()}>
+			<button type="button" class="btn secondary" onclick={() => galleryInput?.click()}>
 				🖼️ Choose photo(s)
 			</button>
 		</div>
 
-		<!-- Automatic fallback when getUserMedia is unavailable/denied, and a
-		     direct "pick from gallery" option either way. `multiple` lets a
-		     browser/device that supports multi-select-from-gallery queue
-		     several at once, same as the camera flow. -->
+		<!-- Camera-preferring input: the Android app's primary capture path
+		     (triggered directly, synchronously, from openCamera above), and the
+		     web build's automatic fallback when getUserMedia is unavailable/denied. -->
 		<input
 			bind:this={fallbackInput}
 			class="visually-hidden"
 			type="file"
 			accept="image/*"
 			capture="environment"
+			multiple
+			onchange={onFallbackChange}
+		/>
+		<!-- Gallery/file picker, no camera hint — lets "Choose photo(s)" mean
+		     what it says instead of also launching the camera. -->
+		<input
+			bind:this={galleryInput}
+			class="visually-hidden"
+			type="file"
+			accept="image/*"
 			multiple
 			onchange={onFallbackChange}
 		/>

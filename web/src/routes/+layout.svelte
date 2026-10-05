@@ -40,7 +40,11 @@
 		let unlistenDeepLink: (() => void) | undefined;
 
 		void primeGeolocationPermission();
-		void primeCameraPermission();
+		// getUserMedia never actually works in the Android app's WebView today
+		// (see the capture-flow comments in sightings/new & sightings/[id]) —
+		// priming it there would just open and immediately close the camera
+		// hardware for nothing. Only worth doing in the web build.
+		if (!IS_APP) void primeCameraPermission();
 
 		void (async () => {
 			// App build: the OIDC login returns the device token via the
