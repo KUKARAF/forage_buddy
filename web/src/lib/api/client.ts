@@ -33,13 +33,46 @@ export class ApiError extends Error {
 export interface RequestOptions {
 	/** Extra headers to merge into the request. */
 	headers?: Record<string, string>;
-	/** AbortSignal for cancellation. */
+	/** AbortSignal for cancellation (combined with the default timeout below, not a replacement for it). */
 	signal?: AbortSignal;
+	/** Override the default request timeout (ms). */
+	timeoutMs?: number;
 }
 
 function authHeaders(): Record<string, string> {
 	const deviceToken = getDeviceToken();
 	return deviceToken !== null ? { Authorization: `Bearer ${deviceToken}` } : {};
+}
+
+// A field app with no client-side request timeout is a trap: on a flaky
+// outdoor connection, a stalled `fetch()` just hangs forever with no error,
+// which is exactly what it looks like to be stuck on "Loading sighting…"
+// indefinitely — the app's existing error + "Try again" UI never gets a
+// chance to show because nothing ever rejects. Every request below gets a
+// default timeout so a stall always eventually surfaces as a retryable
+// error instead. `AbortSignal.timeout`/`AbortSignal.any` are both
+// well-supported in current browsers and Android WebView.
+const DEFAULT_TIMEOUT_MS = 20_000;
+const UPLOAD_TIMEOUT_MS = 60_000;
+// Triage/deep-dive calls out to an LLM and can legitimately take tens of
+// seconds; the backend's own request timeout (routes.rs) is 120s, so the
+// client timeout is set a bit above that rather than racing it.
+const LONG_RUNNING_TIMEOUT_MS = 130_000;
+
+function timeoutSignal(callerSignal: AbortSignal | undefined, ms: number): AbortSignal {
+	const timeout = AbortSignal.timeout(ms);
+	return callerSignal ? AbortSignal.any([callerSignal, timeout]) : timeout;
+}
+
+/** `AbortSignal.timeout()` rejects with a `TimeoutError` DOMException — give
+ * that case a clear, actionable message instead of the generic network-error
+ * text, since "the connection stalled" and "you're offline" read very
+ * differently to someone standing in the woods with one signal bar. */
+function describeFetchFailure(method: string, url: string, cause: unknown): string {
+	if (cause instanceof DOMException && cause.name === 'TimeoutError') {
+		return 'Request timed out — check your connection and try again.';
+	}
+	return `Network error while requesting ${method} ${url}`;
 }
 
 export async function request<TResponse>(
@@ -68,11 +101,11 @@ export async function request<TResponse>(
 				...options.headers
 			},
 			body: body !== undefined ? JSON.stringify(body) : undefined,
-			signal: options.signal
+			signal: timeoutSignal(options.signal, options.timeoutMs ?? DEFAULT_TIMEOUT_MS)
 		});
 	} catch (cause) {
 		throw new ApiError(
-			`Network error while requesting ${method} ${url}`,
+			describeFetchFailure(method, url, cause),
 			0,
 			cause instanceof Error ? cause.message : cause
 		);
@@ -326,11 +359,11 @@ export async function uploadPhoto(
 				...options.headers
 			},
 			body: form,
-			signal: options.signal
+			signal: timeoutSignal(options.signal, options.timeoutMs ?? UPLOAD_TIMEOUT_MS)
 		});
 	} catch (cause) {
 		throw new ApiError(
-			`Network error while requesting POST ${url}`,
+			describeFetchFailure('POST', url, cause),
 			0,
 			cause instanceof Error ? cause.message : cause
 		);
@@ -367,11 +400,11 @@ export async function fetchPhotoBlob(photoId: string, options: RequestOptions = 
 			method: 'GET',
 			credentials: 'include',
 			headers: { ...authHeaders(), ...options.headers },
-			signal: options.signal
+			signal: timeoutSignal(options.signal, options.timeoutMs ?? DEFAULT_TIMEOUT_MS)
 		});
 	} catch (cause) {
 		throw new ApiError(
-			`Network error while requesting GET ${url}`,
+			describeFetchFailure('GET', url, cause),
 			0,
 			cause instanceof Error ? cause.message : cause
 		);
@@ -401,7 +434,7 @@ export function runTriage(sightingId: string, options?: RequestOptions): Promise
 		'POST',
 		`/api/sightings/${encodeURIComponent(sightingId)}/triage`,
 		{},
-		options
+		{ timeoutMs: LONG_RUNNING_TIMEOUT_MS, ...options }
 	);
 }
 
@@ -418,7 +451,7 @@ export function triggerDeepDive(
 		'POST',
 		`/api/sightings/${encodeURIComponent(sightingId)}/deepdive`,
 		{},
-		options
+		{ timeoutMs: LONG_RUNNING_TIMEOUT_MS, ...options }
 	);
 }
 
