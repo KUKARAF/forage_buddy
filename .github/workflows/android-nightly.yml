@@ -73,7 +73,7 @@ jobs:
       - name: Build frontend
         working-directory: web
         env:
-          PUBLIC_API_BASE_URL: https://forage.osmosis.page
+          PUBLIC_API_BASE_URL: https://foraging.osmosis.page
           PUBLIC_APP_MODE: tauri
         run: |
           npm ci

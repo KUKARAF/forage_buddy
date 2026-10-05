@@ -159,5 +159,5 @@ an account, a DNS entry — things Claude cannot create on its own):
 6. **Point a domain + Caddy entry at this container** on the `caddy_proxy` network.
    Explicitly out of scope here — you said you'll handle the actual subdomain and
    reverse-proxy config yourself. `deploy/docker-compose.yml`'s `FORAGEBUDDY_BASE_URL`
-   is left as an editable placeholder (`https://forage.osmosis.page`, a guess at your
+   is left as an editable placeholder (`https://foraging.osmosis.page`, a guess at your
    subdomain convention) — change it to match whatever you set up.

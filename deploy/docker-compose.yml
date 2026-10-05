@@ -15,14 +15,14 @@ services:
       # buddy.osmosis.page). Point this at wherever the Caddy entry for this
       # container actually ends up (that reverse-proxy wiring is a manual
       # step - see the README's "Manual steps before this is live" section).
-      - FORAGEBUDDY_BASE_URL=https://forage.osmosis.page
+      - FORAGEBUDDY_BASE_URL=https://foraging.osmosis.page
       - FORAGEBUDDY_AUTHENTIK_ISSUER_URL=https://auth.osmosis.page/application/o/forage-buddy/
       # Placeholder - fill in after creating the "forage-buddy" OIDC
       # application in Authentik (see README). Until then, either leave this
       # unset and set FORAGEBUDDY_DEV_MODE=true in .env for zero-setup local
       # use, or fill it in for a real deployment.
       - FORAGEBUDDY_OIDC_CLIENT_ID=REPLACE_ME
-      - FORAGEBUDDY_OIDC_REDIRECT_URI=https://forage.osmosis.page/auth/callback
+      - FORAGEBUDDY_OIDC_REDIRECT_URI=https://foraging.osmosis.page/auth/callback
       # No FORAGEBUDDY_OIDC_CLIENT_SECRET: this Authentik provider is a Public
       # client (PKCE-only, no shared secret), matching ai_buddy's pattern.
       - FORAGEBUDDY_SQLITE_PATH=/data/db/forage_buddy.db
