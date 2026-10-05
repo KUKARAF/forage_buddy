@@ -7,13 +7,40 @@
 	import { IS_APP } from '$lib/api/deviceToken';
 	import { startLogin } from '$lib/app/login';
 	import { theme } from '$lib/theme.svelte';
+	import { getCurrentLocation } from '$lib/app/geolocation';
 	import ThemeToggle from '$lib/components/ThemeToggle.svelte';
 
 	let { children } = $props();
 
+	// Best-effort, non-blocking permission priming: surfaces the OS/browser
+	// prompts early (on app boot) rather than waiting for the user to first
+	// hit "Use my location" / the camera on /sightings/new. Both fail silently
+	// — the app already works fine requesting these on demand, so a denied or
+	// unsupported prompt here must never break boot.
+	async function primeGeolocationPermission() {
+		try {
+			await getCurrentLocation();
+		} catch (err) {
+			console.warn('Geolocation permission priming failed (non-fatal):', err);
+		}
+	}
+
+	async function primeCameraPermission() {
+		try {
+			if (typeof navigator === 'undefined' || !navigator.mediaDevices?.getUserMedia) return;
+			const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+			for (const track of stream.getTracks()) track.stop();
+		} catch (err) {
+			console.warn('Camera permission priming failed (non-fatal):', err);
+		}
+	}
+
 	onMount(() => {
 		const unlistenTheme = theme.init();
 		let unlistenDeepLink: (() => void) | undefined;
+
+		void primeGeolocationPermission();
+		void primeCameraPermission();
 
 		void (async () => {
 			// App build: the OIDC login returns the device token via the

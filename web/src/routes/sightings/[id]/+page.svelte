@@ -13,6 +13,7 @@
 	import DangerBadge from '$lib/components/DangerBadge.svelte';
 	import ConfidenceBar from '$lib/components/ConfidenceBar.svelte';
 	import PhotoImg from '$lib/components/PhotoImg.svelte';
+	import CameraCapture from '$lib/components/CameraCapture.svelte';
 
 	const sightingId = $derived(page.params.id as string);
 
@@ -23,6 +24,9 @@
 	let addPhotoInput: HTMLInputElement | undefined = $state();
 	let uploadingPhoto = $state(false);
 	let uploadError = $state<string | null>(null);
+
+	let cameraOpen = $state(false);
+	let cameraUnavailableMessage = $state<string | null>(null);
 
 	let rerunningTriage = $state(false);
 	let triageError = $state<string | null>(null);
@@ -57,21 +61,51 @@
 		void load();
 	});
 
-	async function onAddPhoto(e: Event) {
-		const input = e.currentTarget as HTMLInputElement;
-		const file = input.files?.[0] ?? null;
-		input.value = '';
-		if (!file || !detail) return;
+	/** Uploads every file sequentially (one `uploadPhoto` call after another —
+	 * each upload triggers a full triage LLM call server-side, so sequential
+	 * keeps load predictable), then refreshes the detail view exactly once at
+	 * the end rather than once per file. */
+	async function uploadFiles(files: File[]) {
+		if (files.length === 0 || !detail) return;
 		uploadingPhoto = true;
 		uploadError = null;
 		try {
-			await uploadPhoto(detail.sighting.id, file);
+			for (const file of files) {
+				await uploadPhoto(detail.sighting.id, file);
+			}
 			await load();
 		} catch (err) {
 			uploadError = err instanceof ApiError ? err.message : 'Could not upload that photo.';
 		} finally {
 			uploadingPhoto = false;
 		}
+	}
+
+	async function onAddPhoto(e: Event) {
+		const input = e.currentTarget as HTMLInputElement;
+		const files = input.files ? Array.from(input.files) : [];
+		input.value = '';
+		await uploadFiles(files);
+	}
+
+	function openCamera() {
+		cameraUnavailableMessage = null;
+		cameraOpen = true;
+	}
+
+	async function onCameraDone(files: File[]) {
+		cameraOpen = false;
+		await uploadFiles(files);
+	}
+
+	function onCameraCancel() {
+		cameraOpen = false;
+	}
+
+	function onCameraUnavailable() {
+		cameraOpen = false;
+		cameraUnavailableMessage = 'Camera not available — choose or take a photo instead.';
+		addPhotoInput?.click();
 	}
 
 	async function rerunTriage() {
@@ -147,17 +181,32 @@
 				</button>
 			{/each}
 		</div>
+		<!-- Automatic fallback when getUserMedia is unavailable/denied, and a
+		     direct "pick from gallery" option either way. `multiple` lets a
+		     browser/device that supports multi-select-from-gallery queue
+		     several at once in a single upload batch. -->
 		<input
 			bind:this={addPhotoInput}
 			type="file"
 			accept="image/*"
 			capture="environment"
+			multiple
 			class="visually-hidden"
 			onchange={onAddPhoto}
 		/>
-		<button class="btn secondary" disabled={uploadingPhoto} onclick={() => addPhotoInput?.click()}>
-			{uploadingPhoto ? 'Uploading…' : '+ Add another photo'}
-		</button>
+		<div class="capture-actions">
+			<button class="btn" disabled={uploadingPhoto} onclick={openCamera}> 📷 Take a photo </button>
+			<button
+				class="btn secondary"
+				disabled={uploadingPhoto}
+				onclick={() => addPhotoInput?.click()}
+			>
+				{uploadingPhoto ? 'Uploading…' : '🖼️ Choose photo(s)'}
+			</button>
+		</div>
+		{#if cameraUnavailableMessage}
+			<p class="muted small">{cameraUnavailableMessage}</p>
+		{/if}
 		{#if uploadError}
 			<p class="error-text">{uploadError}</p>
 		{/if}
@@ -315,6 +364,14 @@
 			<PhotoImg photoId={lightboxPhotoId} alt="Full-size specimen photo" class="lightbox-img" />
 		</div>
 	{/if}
+
+	{#if cameraOpen}
+		<CameraCapture
+			ondone={onCameraDone}
+			oncancel={onCameraCancel}
+			onunavailable={onCameraUnavailable}
+		/>
+	{/if}
 {/if}
 
 <style>
@@ -368,6 +425,12 @@
 		height: 1px;
 		overflow: hidden;
 		clip: rect(0 0 0 0);
+	}
+
+	.capture-actions {
+		display: flex;
+		gap: 10px;
+		flex-wrap: wrap;
 	}
 
 	.small-btn {

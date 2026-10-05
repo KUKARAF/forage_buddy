@@ -1,12 +1,22 @@
 <script lang="ts">
+	import { onDestroy } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { resolve } from '$app/paths';
 	import { createSighting, uploadPhoto, ApiError } from '$lib/api/client';
 	import { getCurrentLocation, GeolocationError, type GeoResult } from '$lib/app/geolocation';
 	import { datetimeLocalToRfc3339, nowAsDatetimeLocal } from '$lib/format';
+	import CameraCapture from '$lib/components/CameraCapture.svelte';
 
-	let photoFile = $state<File | null>(null);
-	let photoPreviewUrl = $state<string | null>(null);
+	interface PendingPhoto {
+		id: string;
+		file: File;
+		url: string;
+	}
+
+	// Queued photos, to be uploaded one-by-one (sequentially, not in parallel —
+	// each upload triggers a full triage LLM call server-side; sequential keeps
+	// load predictable) right after the sighting itself is created.
+	let pendingPhotos = $state<PendingPhoto[]>([]);
 	let location = $state<GeoResult | null>(null);
 	let locating = $state(false);
 	let locationError = $state<string | null>(null);
@@ -15,22 +25,53 @@
 	let submitting = $state(false);
 	let submitError = $state<string | null>(null);
 
-	let fileInput: HTMLInputElement | undefined = $state();
+	let cameraOpen = $state(false);
+	let cameraUnavailableMessage = $state<string | null>(null);
+	let fallbackInput: HTMLInputElement | undefined = $state();
 
-	function onPhotoChange(e: Event) {
+	function addFiles(files: File[]) {
+		for (const file of files) {
+			pendingPhotos.push({ id: crypto.randomUUID(), file, url: URL.createObjectURL(file) });
+		}
+	}
+
+	function removePendingPhoto(id: string) {
+		const idx = pendingPhotos.findIndex((p) => p.id === id);
+		if (idx === -1) return;
+		URL.revokeObjectURL(pendingPhotos[idx].url);
+		pendingPhotos.splice(idx, 1);
+	}
+
+	function openCamera() {
+		cameraUnavailableMessage = null;
+		cameraOpen = true;
+	}
+
+	function onCameraDone(files: File[]) {
+		cameraOpen = false;
+		addFiles(files);
+	}
+
+	function onCameraCancel() {
+		cameraOpen = false;
+	}
+
+	function onCameraUnavailable() {
+		cameraOpen = false;
+		cameraUnavailableMessage = 'Camera not available — choose or take a photo instead.';
+		fallbackInput?.click();
+	}
+
+	function onFallbackChange(e: Event) {
 		const input = e.currentTarget as HTMLInputElement;
-		const file = input.files?.[0] ?? null;
-		if (photoPreviewUrl) URL.revokeObjectURL(photoPreviewUrl);
-		photoFile = file;
-		photoPreviewUrl = file ? URL.createObjectURL(file) : null;
+		const files = input.files ? Array.from(input.files) : [];
+		input.value = '';
+		addFiles(files);
 	}
 
-	function clearPhoto() {
-		if (photoPreviewUrl) URL.revokeObjectURL(photoPreviewUrl);
-		photoFile = null;
-		photoPreviewUrl = null;
-		if (fileInput) fileInput.value = '';
-	}
+	onDestroy(() => {
+		for (const photo of pendingPhotos) URL.revokeObjectURL(photo.url);
+	});
 
 	async function useMyLocation() {
 		locating = true;
@@ -51,7 +92,7 @@
 	}
 
 	async function submit() {
-		if (!photoFile) {
+		if (pendingPhotos.length === 0) {
 			submitError = 'Add a photo to continue — triage needs at least one.';
 			return;
 		}
@@ -66,7 +107,10 @@
 				observed_at: observedAtRfc3339,
 				notes: notes.trim() ? notes.trim() : undefined
 			});
-			await uploadPhoto(sighting.id, photoFile, { takenAt: observedAtRfc3339 });
+			// Sequential on purpose — see the comment on `pendingPhotos` above.
+			for (const photo of pendingPhotos) {
+				await uploadPhoto(sighting.id, photo.file, { takenAt: observedAtRfc3339 });
+			}
 			await goto(resolve('/sightings/[id]', { id: sighting.id }));
 		} catch (err) {
 			submitError = err instanceof ApiError ? err.message : 'Could not create the sighting.';
@@ -92,21 +136,49 @@
 	}}
 >
 	<div class="field">
-		<label for="photo">Photo</label>
-		{#if photoPreviewUrl}
-			<div class="preview">
-				<img src={photoPreviewUrl} alt="Selected specimen" />
-				<button type="button" class="btn secondary" onclick={clearPhoto}>Remove photo</button>
+		<span class="field-label">Photos</span>
+
+		{#if pendingPhotos.length > 0}
+			<div class="photo-grid">
+				{#each pendingPhotos as photo (photo.id)}
+					<div class="photo-thumb">
+						<img src={photo.url} alt="Queued specimen" />
+						<button
+							type="button"
+							class="thumb-remove"
+							onclick={() => removePendingPhoto(photo.id)}
+							aria-label="Remove this photo"
+						>
+							✕
+						</button>
+					</div>
+				{/each}
 			</div>
-		{:else}
-			<input
-				bind:this={fileInput}
-				id="photo"
-				type="file"
-				accept="image/*"
-				capture="environment"
-				onchange={onPhotoChange}
-			/>
+		{/if}
+
+		<div class="capture-actions">
+			<button type="button" class="btn" onclick={openCamera}>📷 Take a photo</button>
+			<button type="button" class="btn secondary" onclick={() => fallbackInput?.click()}>
+				🖼️ Choose photo(s)
+			</button>
+		</div>
+
+		<!-- Automatic fallback when getUserMedia is unavailable/denied, and a
+		     direct "pick from gallery" option either way. `multiple` lets a
+		     browser/device that supports multi-select-from-gallery queue
+		     several at once, same as the camera flow. -->
+		<input
+			bind:this={fallbackInput}
+			class="visually-hidden"
+			type="file"
+			accept="image/*"
+			capture="environment"
+			multiple
+			onchange={onFallbackChange}
+		/>
+
+		{#if cameraUnavailableMessage}
+			<p class="muted small">{cameraUnavailableMessage}</p>
 		{/if}
 	</div>
 
@@ -152,6 +224,14 @@
 	</button>
 </form>
 
+{#if cameraOpen}
+	<CameraCapture
+		ondone={onCameraDone}
+		oncancel={onCameraCancel}
+		onunavailable={onCameraUnavailable}
+	/>
+{/if}
+
 <style>
 	.field-label {
 		display: block;
@@ -160,18 +240,57 @@
 		margin-bottom: 6px;
 	}
 
-	.preview {
-		display: flex;
-		flex-direction: column;
+	.photo-grid {
+		display: grid;
+		grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
 		gap: 10px;
-		align-items: flex-start;
+		margin-bottom: 12px;
 	}
-	.preview img {
-		max-width: 100%;
-		max-height: 320px;
+	.photo-thumb {
+		position: relative;
+		aspect-ratio: 1;
 		border-radius: var(--radius-card);
+		overflow: hidden;
 		border: 1px solid var(--line);
-		object-fit: contain;
+		background: var(--tag-bg);
+	}
+	.photo-thumb img {
+		width: 100%;
+		height: 100%;
+		object-fit: cover;
+		display: block;
+	}
+	.thumb-remove {
+		position: absolute;
+		top: 6px;
+		right: 6px;
+		width: 26px;
+		height: 26px;
+		min-height: 0;
+		border-radius: 999px;
+		border: none;
+		background: var(--red);
+		color: var(--btn-ink);
+		font-size: 13px;
+		line-height: 1;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		padding: 0;
+	}
+
+	.capture-actions {
+		display: flex;
+		gap: 10px;
+		flex-wrap: wrap;
+	}
+
+	.visually-hidden {
+		position: absolute;
+		width: 1px;
+		height: 1px;
+		overflow: hidden;
+		clip: rect(0 0 0 0);
 	}
 
 	.location-chip {
