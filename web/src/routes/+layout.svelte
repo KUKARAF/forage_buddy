@@ -6,10 +6,13 @@
 	import { auth } from '$lib/authState.svelte';
 	import { IS_APP } from '$lib/api/deviceToken';
 	import { startLogin } from '$lib/app/login';
+	import { theme } from '$lib/theme.svelte';
+	import ThemeToggle from '$lib/components/ThemeToggle.svelte';
 
 	let { children } = $props();
 
 	onMount(() => {
+		const unlistenTheme = theme.init();
 		let unlistenDeepLink: (() => void) | undefined;
 
 		void (async () => {
@@ -33,7 +36,10 @@
 			}
 		})();
 
-		return () => unlistenDeepLink?.();
+		return () => {
+			unlistenTheme();
+			unlistenDeepLink?.();
+		};
 	});
 
 	const home = resolve('/');
@@ -55,9 +61,12 @@
 			<a class="brand" href={home}>
 				<span aria-hidden="true">🌿</span> Forage Buddy
 			</a>
-			{#if path !== home}
-				<a class="back" href={home}>← All sightings</a>
-			{/if}
+			<div class="topbar-right">
+				{#if path !== home}
+					<a class="back" href={home}>← All sightings</a>
+				{/if}
+				<ThemeToggle />
+			</div>
 		</header>
 		<main class="content">
 			{@render children()}
@@ -100,10 +109,15 @@
 		font-weight: 800;
 		font-size: 18px;
 		letter-spacing: -0.01em;
-		color: var(--forest);
+		color: var(--accent);
 		display: inline-flex;
 		align-items: center;
 		gap: 8px;
+	}
+	.topbar-right {
+		display: flex;
+		align-items: center;
+		gap: 14px;
 	}
 	.back {
 		font-weight: 600;
@@ -111,7 +125,7 @@
 		color: var(--muted);
 	}
 	.back:hover {
-		color: var(--forest);
+		color: var(--accent);
 	}
 
 	.content {

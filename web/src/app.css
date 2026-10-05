@@ -11,14 +11,26 @@
 	--line: #ddddc9;
 	--card: #ffffff;
 	--tag-bg: #eef0e2;
+	--input-bg: #ffffff;
+	--overlay: rgba(10, 15, 8, 0.86);
+	--hover-overlay: rgba(0, 0, 0, 0.06);
 
-	/* brand greens */
+	/* brand greens. --forest is used as a background (buttons), so it is
+	   intentionally the SAME in both themes — white button text needs a
+	   consistently dark/saturated green regardless of page theme. --accent
+	   is the equivalent color for TEXT/links drawn on top of --bg/--card, and
+	   is brightened in dark mode so it stays legible against a dark surface. */
 	--forest: #2f5233;
+	--accent: #2f5233;
 	--moss: #4f7942;
 	--leaf: #7fa650;
 	--leaf-ink: #2f5233;
+	--btn-ink: #fff;
 
-	/* danger-level scale (also used for status badges) */
+	/* danger-level scale (also used for status badges). Kept saturated and
+	   high-contrast in both themes — see the :root.dark overrides below for
+	   why these particular dark-mode values were chosen (deadly_toxic red
+	   especially must never read as "subtle"). */
 	--grey: #8a8f82;
 	--grey-bg: #ecece4;
 	--green: #2f7d3a;
@@ -34,6 +46,7 @@
 	--radius-btn: 10px;
 
 	--shadow: 0 1px 2px rgba(35, 48, 31, 0.06), 0 2px 8px rgba(35, 48, 31, 0.08);
+	--shadow-strong: 0 4px 16px rgba(35, 48, 31, 0.3);
 
 	--font: -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
 
@@ -43,6 +56,44 @@
 	--safe-right: max(env(safe-area-inset-right, 0px), var(--safe-area-inset-right, 0px));
 	--safe-bottom: max(env(safe-area-inset-bottom, 0px), var(--safe-area-inset-bottom, 0px));
 	--safe-left: max(env(safe-area-inset-left, 0px), var(--safe-area-inset-left, 0px));
+}
+
+/* Dark mode. Applied by toggling the `dark` class on <html> (see the inline
+   bootstrap script in app.html, which runs before first paint to avoid a
+   flash of the wrong theme, and $lib/theme.svelte.ts, which keeps it in sync
+   afterwards). Same earthy/foraging palette, re-tuned for a dark surface —
+   not a generic dark redesign. */
+:root.dark {
+	--bg: #11140e;
+	--ink: #e9ebe0;
+	--muted: #a3a890;
+	--line: #434f34;
+	--card: #242b1c;
+	--tag-bg: #2f3824;
+	--input-bg: #1a1f14;
+	--overlay: rgba(0, 0, 0, 0.72);
+	--hover-overlay: rgba(255, 255, 255, 0.08);
+
+	--accent: #6bb366;
+
+	/* Danger scale: NOT a simple "darken everything" pass. Each foreground
+	   color is brightened/saturated so it still pops against the dark card
+	   background, and deadly_toxic red is kept the most vivid, highly
+	   saturated color in the whole palette on purpose — it must stay
+	   unmistakably alarming, never fade into a muted/tasteful dark-mode red. */
+	--grey: #a7ac9c;
+	--grey-bg: #2b2f24;
+	--green: #5fd16a;
+	--green-bg: #163a1c;
+	--amber: #ffcc4d;
+	--amber-bg: #3a2d0c;
+	--orange: #ff9b4a;
+	--orange-bg: #3d2007;
+	--red: #ff3b3b;
+	--red-bg: #3d0a0e;
+
+	--shadow: 0 1px 2px rgba(0, 0, 0, 0.5), 0 2px 10px rgba(0, 0, 0, 0.55);
+	--shadow-strong: 0 4px 20px rgba(0, 0, 0, 0.6);
 }
 
 * {
@@ -109,7 +160,7 @@ button:disabled {
 	border: 1px solid transparent;
 	font-weight: 600;
 	background: var(--forest);
-	color: #fff;
+	color: var(--btn-ink);
 }
 
 .btn:hover:not(:disabled) {
@@ -118,7 +169,7 @@ button:disabled {
 
 .btn.secondary {
 	background: var(--card);
-	color: var(--forest);
+	color: var(--accent);
 	border-color: var(--line);
 }
 
@@ -147,7 +198,7 @@ textarea {
 	padding: 10px 12px;
 	border: 1px solid var(--line);
 	border-radius: var(--radius-btn);
-	background: #fff;
+	background: var(--input-bg);
 	color: var(--ink);
 }
 

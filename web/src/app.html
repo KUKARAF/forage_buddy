@@ -10,6 +10,33 @@
 		<meta name="referrer" content="strict-origin-when-cross-origin" />
 
 		<!--
+			Dark mode bootstrap: applies the `dark` class to <html> BEFORE first
+			paint, so there's no flash of the wrong theme while Svelte loads and
+			hydrates ($lib/theme.svelte.ts takes over from here once it's up).
+			Reads the same localStorage key + resolution rule ('system' falls
+			back to prefers-color-scheme) as that module. Inline and synchronous
+			(no src, no type="module", no async/defer) so it blocks parsing and
+			always runs ahead of paint; safe under this app's CSP since the
+			backend's script-src allows 'unsafe-inline' (see security.rs) and
+			this introduces no eval and no external script source.
+		-->
+		<script>
+			(function () {
+				try {
+					var stored = localStorage.getItem('forage-buddy-theme');
+					var theme = stored === 'light' || stored === 'dark' ? stored : 'system';
+					var dark =
+						theme === 'dark' ||
+						(theme === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+					if (dark) document.documentElement.classList.add('dark');
+				} catch (e) {
+					// localStorage/matchMedia unavailable — fall back to light, the
+					// default :root palette.
+				}
+			})();
+		</script>
+
+		<!--
 			Content-Security-Policy is intentionally NOT set as a <meta http-equiv>
 			here. The Rust server sets the CSP (and other security headers) on EVERY
 			response — including this static SPA shell — via a response-header

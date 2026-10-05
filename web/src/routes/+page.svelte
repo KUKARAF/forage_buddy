@@ -181,7 +181,7 @@
 		right: calc(24px + var(--safe-right));
 		border-radius: 999px;
 		padding: 14px 20px;
-		box-shadow: 0 4px 16px rgba(35, 48, 31, 0.3);
+		box-shadow: var(--shadow-strong);
 		font-size: 15px;
 	}
 </style>

@@ -58,6 +58,6 @@
 		border-radius: 8px;
 	}
 	.dismiss:hover {
-		background: rgba(0, 0, 0, 0.06);
+		background: var(--hover-overlay);
 	}
 </style>

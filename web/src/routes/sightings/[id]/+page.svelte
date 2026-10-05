@@ -442,7 +442,7 @@
 		margin-bottom: 14px;
 	}
 	.wiki a {
-		color: var(--forest);
+		color: var(--accent);
 		font-weight: 600;
 	}
 
@@ -528,7 +528,7 @@
 	.lightbox {
 		position: fixed;
 		inset: 0;
-		background: rgba(10, 15, 8, 0.86);
+		background: var(--overlay);
 		display: flex;
 		align-items: center;
 		justify-content: center;
