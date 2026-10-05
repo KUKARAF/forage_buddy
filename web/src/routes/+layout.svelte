@@ -12,6 +12,11 @@
 
 	let { children } = $props();
 
+	// Short commit SHA baked in at build time (unset in local dev). Shown in
+	// a small footer so "are you sure you're on the latest build" is never a
+	// guessing game when debugging a report.
+	const buildSha = import.meta.env.PUBLIC_BUILD_SHA as string | undefined;
+
 	// Best-effort, non-blocking permission priming: surfaces the OS/browser
 	// prompts early (on app boot) rather than waiting for the user to first
 	// hit "Use my location" / the camera on /sightings/new. Both fail silently
@@ -102,6 +107,9 @@
 		<main class="content">
 			{@render children()}
 		</main>
+		{#if buildSha}
+			<footer class="build-footer">build {buildSha}</footer>
+		{/if}
 	</div>
 {/if}
 
@@ -166,5 +174,13 @@
 		margin: 0 auto;
 		padding: 20px calc(16px + var(--safe-right)) calc(48px + var(--safe-bottom))
 			calc(16px + var(--safe-left));
+	}
+
+	.build-footer {
+		text-align: center;
+		font-size: 11px;
+		color: var(--muted);
+		opacity: 0.6;
+		padding: 0 0 calc(10px + var(--safe-bottom));
 	}
 </style>

@@ -80,6 +80,7 @@ jobs:
         env:
           PUBLIC_API_BASE_URL: https://foraging.osmosis.page
           PUBLIC_APP_MODE: tauri
+          PUBLIC_BUILD_SHA: ${{ github.sha }}
         run: |
           npm ci
           npm run build

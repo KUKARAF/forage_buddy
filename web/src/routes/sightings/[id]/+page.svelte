@@ -21,8 +21,17 @@
 	let detail = $state<SightingDetail | null>(null);
 	let loading = $state(true);
 	let loadError = $state<string | null>(null);
+	// Separate from loadError: if `getSightingDetail` succeeds but something
+	// in rendering the result throws (an unexpected data shape, a bug in a
+	// child component, ...), <svelte:boundary> below catches it here instead
+	// of silently leaving the page frozen on its last-rendered state (which
+	// is exactly what an unguarded render-time exception looks like — the
+	// "Loading sighting…" text can be left on screen forever since `loading`
+	// already flipped false but the branch swap that would remove it never
+	// completed). This turns an invisible freeze into a visible, reportable
+	// error with the actual message.
+	let renderError = $state<string | null>(null);
 
-	let addPhotoInput: HTMLInputElement | undefined = $state();
 	let galleryInput: HTMLInputElement | undefined = $state();
 	let uploadingPhoto = $state(false);
 	let uploadError = $state<string | null>(null);
@@ -90,16 +99,12 @@
 		await uploadFiles(files);
 	}
 
-	// See the matching comment in sightings/new/+page.svelte: getUserMedia
-	// never actually works in the Android app's WebView, and trying it first
-	// means the file-input fallback fires outside the original tap's trusted
-	// user-gesture window, which some WebViews silently refuse to honor — so
-	// the app build skips straight to the reliable `<input capture>` handoff.
+	// See the matching comment in sightings/new/+page.svelte: there is no
+	// reliable in-app camera on Android today (the WebView's file chooser
+	// doesn't honor <input capture>, and getUserMedia can't get a real
+	// permission grant either), so the app build only offers the gallery
+	// picker — no button that promises a camera it can't deliver.
 	function openCamera() {
-		if (IS_APP) {
-			addPhotoInput?.click();
-			return;
-		}
 		cameraUnavailableMessage = null;
 		cameraOpen = true;
 	}
@@ -115,8 +120,8 @@
 
 	function onCameraUnavailable() {
 		cameraOpen = false;
-		cameraUnavailableMessage = 'Camera not available — choose or take a photo instead.';
-		addPhotoInput?.click();
+		cameraUnavailableMessage = 'Camera not available — choose a photo instead.';
+		galleryInput?.click();
 	}
 
 	async function rerunTriage() {
@@ -165,231 +170,250 @@
 		<button class="btn secondary" onclick={load}>Try again</button>
 	</div>
 {:else if detail}
-	<SafetyBanner />
-
-	<div class="header-row">
-		<div>
-			<h1>Sighting</h1>
-			<p class="muted">
-				{relativeTime(detail.sighting.observed_at)}
-				{#if placeOrCoords(detail.sighting.place_label, detail.sighting.lat, detail.sighting.lon)}
-					· {placeOrCoords(detail.sighting.place_label, detail.sighting.lat, detail.sighting.lon)}
-				{/if}
-			</p>
-		</div>
-	</div>
-
-	{#if detail.sighting.notes}
-		<p class="notes">{detail.sighting.notes}</p>
-	{/if}
-
-	<section class="card">
-		<h2>Photos</h2>
-		<div class="gallery">
-			{#each detail.photos as photo (photo.id)}
-				<button class="thumb-btn" onclick={() => (lightboxPhotoId = photo.id)}>
-					<PhotoImg photoId={photo.id} alt="Specimen photo" class="thumb-img" />
-				</button>
-			{/each}
-		</div>
-		<!-- Camera-capture input: the Android app's primary capture path
-		     (triggered directly, synchronously, from openCamera below), and the
-		     web build's automatic fallback when getUserMedia is unavailable/denied.
-		     Deliberately NOT `multiple` — Chrome/Android silently drops the
-		     `capture` hint (falling back to a generic file/gallery picker) when
-		     `multiple` is also set on the same input, which is exactly what
-		     broke "Take a photo" before. One shot per tap; tap again for more. -->
-		<input
-			bind:this={addPhotoInput}
-			type="file"
-			accept="image/*"
-			capture="environment"
-			class="visually-hidden"
-			onchange={onAddPhoto}
-		/>
-		<!-- Gallery/file picker, no camera hint. -->
-		<input
-			bind:this={galleryInput}
-			type="file"
-			accept="image/*"
-			multiple
-			class="visually-hidden"
-			onchange={onAddPhoto}
-		/>
-		<div class="capture-actions">
-			<button class="btn" disabled={uploadingPhoto} onclick={openCamera}> 📷 Take a photo </button>
-			<button class="btn secondary" disabled={uploadingPhoto} onclick={() => galleryInput?.click()}>
-				{uploadingPhoto ? 'Uploading…' : '🖼️ Choose photo(s)'}
-			</button>
-		</div>
-		{#if cameraUnavailableMessage}
-			<p class="muted small">{cameraUnavailableMessage}</p>
-		{/if}
-		{#if uploadError}
-			<p class="error-text">{uploadError}</p>
-		{/if}
-	</section>
-
-	<section class="card">
-		<div class="card-head">
-			<h2>Triage</h2>
-			<button class="btn secondary small-btn" disabled={rerunningTriage} onclick={rerunTriage}>
-				{rerunningTriage ? 'Re-running…' : 'Re-run triage'}
-			</button>
-		</div>
-
-		{#if !detail.triage}
-			<p class="muted">
-				No triage result yet — it runs automatically right after a photo upload. Try "Re-run triage"
-				if it's been a moment.
-			</p>
-		{:else if detail.triage.status === 'insufficient'}
-			<div class="missing-info">
-				<p class="missing-head">📸 We need a bit more to go on:</p>
-				<ul>
-					{#each detail.triage.missing_info as ask (ask)}
-						<li>{ask}</li>
-					{/each}
-				</ul>
+	<svelte:boundary
+		onerror={(err) => {
+			renderError = err instanceof Error ? err.message : String(err);
+			console.error('Error rendering sighting detail:', err);
+		}}
+	>
+		{#snippet failed(error, reset)}
+			<div class="card error">
+				<p>Something went wrong showing this sighting: {renderError ?? String(error)}</p>
+				<button
+					class="btn secondary"
+					onclick={() => {
+						renderError = null;
+						reset();
+					}}>Try again</button
+				>
 			</div>
-			<p class="muted small reasoning">{detail.triage.reasoning}</p>
-		{:else}
-			<ul class="candidates">
-				{#each detail.triage.candidate_species as candidate (candidate.species)}
-					<li>
-						<div class="candidate-name">
-							<strong>{candidate.species}</strong>
-							{#if candidate.common_name}<span class="muted">({candidate.common_name})</span>{/if}
-						</div>
-						<ConfidenceBar confidence={candidate.confidence} />
-					</li>
-				{/each}
-			</ul>
-			<p class="muted small reasoning">{detail.triage.reasoning}</p>
-		{/if}
+		{/snippet}
+		<SafetyBanner />
 
-		{#if triageError}
-			<p class="error-text">{triageError}</p>
-		{/if}
-
-		<div class="deepdive-trigger">
-			<button
-				class="btn"
-				disabled={!canRunDeepDive || deepDiveLoading}
-				title={!canRunDeepDive
-					? 'Needs at least a genus candidate before a deep dive makes sense'
-					: ''}
-				onclick={runDeepDive}
-			>
-				{deepDiveLoading
-					? 'Running deep dive…'
-					: detail.deepdive
-						? 'Re-run deep dive'
-						: 'Run deep dive'}
-			</button>
-		</div>
-	</section>
-
-	{#if deepDiveLoading}
-		<section class="card deepdive-loading">
-			<div class="spinner" aria-hidden="true"></div>
-			<p>Checking Wikipedia and known look-alikes… this can take a little while.</p>
-		</section>
-	{:else if deepDiveError}
-		<section class="card error">
-			<p>{deepDiveError}</p>
-		</section>
-	{:else if detail.deepdive}
-		{@const dd = detail.deepdive}
-		<section class="card deepdive">
-			<h2>Deep dive</h2>
-			<SafetyBanner />
-
-			<div class="best-match">
-				<strong>{dd.best_match_species}</strong>
-				<ConfidenceBar confidence={dd.confidence} />
-			</div>
-
-			{#if dd.wikipedia_extract}
-				<div class="wiki">
-					<p>{dd.wikipedia_extract}</p>
-					{#if dd.wikipedia_url}
-						<a href={dd.wikipedia_url} target="_blank" rel="noopener noreferrer external"
-							>Read more on Wikipedia →</a
-						>
+		<div class="header-row">
+			<div>
+				<h1>Sighting</h1>
+				<p class="muted">
+					{relativeTime(detail.sighting.observed_at)}
+					{#if placeOrCoords(detail.sighting.place_label, detail.sighting.lat, detail.sighting.lon)}
+						· {placeOrCoords(detail.sighting.place_label, detail.sighting.lat, detail.sighting.lon)}
 					{/if}
-				</div>
-			{/if}
+				</p>
+			</div>
+		</div>
 
-			{#if dd.confusants.length > 0}
-				<h3>⚠️ Could be confused with</h3>
-				<ul class="confusants">
-					{#each dd.confusants as confusant, ci (confusant.species)}
-						<li
-							class="confusant level-{confusant.danger_level}"
-							class:alarming={confusant.danger_level === 'deadly_toxic'}
-						>
-							<div class="confusant-head">
-								<div>
-									<strong>{confusant.species}</strong>
-									{#if confusant.common_name}<span class="muted">
-											({confusant.common_name})</span
-										>{/if}
-								</div>
-								<DangerBadge level={confusant.danger_level} />
+		{#if detail.sighting.notes}
+			<p class="notes">{detail.sighting.notes}</p>
+		{/if}
+
+		<section class="card">
+			<h2>Photos</h2>
+			<div class="gallery">
+				{#each detail.photos as photo (photo.id)}
+					<button class="thumb-btn" onclick={() => (lightboxPhotoId = photo.id)}>
+						<PhotoImg photoId={photo.id} alt="Specimen photo" class="thumb-img" />
+					</button>
+				{/each}
+			</div>
+			<!-- Gallery/file picker. Also the web build's fallback when
+		     getUserMedia is unavailable/denied. -->
+			<input
+				bind:this={galleryInput}
+				type="file"
+				accept="image/*"
+				multiple
+				class="visually-hidden"
+				onchange={onAddPhoto}
+			/>
+			<div class="capture-actions">
+				{#if !IS_APP}
+					<button class="btn" disabled={uploadingPhoto} onclick={openCamera}>
+						📷 Take a photo
+					</button>
+					<button
+						class="btn secondary"
+						disabled={uploadingPhoto}
+						onclick={() => galleryInput?.click()}
+					>
+						{uploadingPhoto ? 'Uploading…' : '🖼️ Choose photo(s)'}
+					</button>
+				{:else}
+					<!-- No in-app camera on Android today — one honest action: take the
+				     photo with your camera app, then pick it here. -->
+					<button class="btn" disabled={uploadingPhoto} onclick={() => galleryInput?.click()}>
+						{uploadingPhoto ? 'Uploading…' : '📷 Add photo(s)'}
+					</button>
+				{/if}
+			</div>
+			{#if cameraUnavailableMessage}
+				<p class="muted small">{cameraUnavailableMessage}</p>
+			{/if}
+			{#if uploadError}
+				<p class="error-text">{uploadError}</p>
+			{/if}
+		</section>
+
+		<section class="card">
+			<div class="card-head">
+				<h2>Triage</h2>
+				<button class="btn secondary small-btn" disabled={rerunningTriage} onclick={rerunTriage}>
+					{rerunningTriage ? 'Re-running…' : 'Re-run triage'}
+				</button>
+			</div>
+
+			{#if !detail.triage}
+				<p class="muted">
+					No triage result yet — it runs automatically right after a photo upload. Try "Re-run
+					triage" if it's been a moment.
+				</p>
+			{:else if detail.triage.status === 'insufficient'}
+				<div class="missing-info">
+					<p class="missing-head">📸 We need a bit more to go on:</p>
+					<ul>
+						{#each detail.triage.missing_info as ask (ask)}
+							<li>{ask}</li>
+						{/each}
+					</ul>
+				</div>
+				<p class="muted small reasoning">{detail.triage.reasoning}</p>
+			{:else}
+				<ul class="candidates">
+					{#each detail.triage.candidate_species as candidate (candidate.species)}
+						<li>
+							<div class="candidate-name">
+								<strong>{candidate.species}</strong>
+								{#if candidate.common_name}<span class="muted">({candidate.common_name})</span>{/if}
 							</div>
-							{#if confusant.notes}
-								<p class="confusant-notes">{confusant.notes}</p>
-							{/if}
-							{#if confusant.distinguishing_features.length > 0}
-								<p class="checklist-label muted small">Check to rule out:</p>
-								<ul class="checklist">
-									{#each confusant.distinguishing_features as feature, fi (feature)}
-										<li>
-											<label>
-												<input
-													type="checkbox"
-													checked={checklist[checklistKey(ci, fi)] ?? false}
-													onchange={(e) =>
-														(checklist[checklistKey(ci, fi)] = (
-															e.currentTarget as HTMLInputElement
-														).checked)}
-												/>
-												{feature}
-											</label>
-										</li>
-									{/each}
-								</ul>
-							{/if}
+							<ConfidenceBar confidence={candidate.confidence} />
 						</li>
 					{/each}
 				</ul>
+				<p class="muted small reasoning">{detail.triage.reasoning}</p>
 			{/if}
 
-			<p class="safety-notes muted small">{dd.safety_notes}</p>
+			{#if triageError}
+				<p class="error-text">{triageError}</p>
+			{/if}
+
+			<div class="deepdive-trigger">
+				<button
+					class="btn"
+					disabled={!canRunDeepDive || deepDiveLoading}
+					title={!canRunDeepDive
+						? 'Needs at least a genus candidate before a deep dive makes sense'
+						: ''}
+					onclick={runDeepDive}
+				>
+					{deepDiveLoading
+						? 'Running deep dive…'
+						: detail.deepdive
+							? 'Re-run deep dive'
+							: 'Run deep dive'}
+				</button>
+			</div>
 		</section>
-	{/if}
 
-	{#if lightboxPhotoId}
-		<div
-			class="lightbox"
-			role="button"
-			tabindex="0"
-			aria-label="Close full-size photo"
-			onclick={() => (lightboxPhotoId = null)}
-			onkeydown={(e) => e.key === 'Escape' && (lightboxPhotoId = null)}
-		>
-			<PhotoImg photoId={lightboxPhotoId} alt="Full-size specimen photo" class="lightbox-img" />
-		</div>
-	{/if}
+		{#if deepDiveLoading}
+			<section class="card deepdive-loading">
+				<div class="spinner" aria-hidden="true"></div>
+				<p>Checking Wikipedia and known look-alikes… this can take a little while.</p>
+			</section>
+		{:else if deepDiveError}
+			<section class="card error">
+				<p>{deepDiveError}</p>
+			</section>
+		{:else if detail.deepdive}
+			{@const dd = detail.deepdive}
+			<section class="card deepdive">
+				<h2>Deep dive</h2>
+				<SafetyBanner />
 
-	{#if cameraOpen}
-		<CameraCapture
-			ondone={onCameraDone}
-			oncancel={onCameraCancel}
-			onunavailable={onCameraUnavailable}
-		/>
-	{/if}
+				<div class="best-match">
+					<strong>{dd.best_match_species}</strong>
+					<ConfidenceBar confidence={dd.confidence} />
+				</div>
+
+				{#if dd.wikipedia_extract}
+					<div class="wiki">
+						<p>{dd.wikipedia_extract}</p>
+						{#if dd.wikipedia_url}
+							<a href={dd.wikipedia_url} target="_blank" rel="noopener noreferrer external"
+								>Read more on Wikipedia →</a
+							>
+						{/if}
+					</div>
+				{/if}
+
+				{#if dd.confusants.length > 0}
+					<h3>⚠️ Could be confused with</h3>
+					<ul class="confusants">
+						{#each dd.confusants as confusant, ci (confusant.species)}
+							<li
+								class="confusant level-{confusant.danger_level}"
+								class:alarming={confusant.danger_level === 'deadly_toxic'}
+							>
+								<div class="confusant-head">
+									<div>
+										<strong>{confusant.species}</strong>
+										{#if confusant.common_name}<span class="muted">
+												({confusant.common_name})</span
+											>{/if}
+									</div>
+									<DangerBadge level={confusant.danger_level} />
+								</div>
+								{#if confusant.notes}
+									<p class="confusant-notes">{confusant.notes}</p>
+								{/if}
+								{#if confusant.distinguishing_features.length > 0}
+									<p class="checklist-label muted small">Check to rule out:</p>
+									<ul class="checklist">
+										{#each confusant.distinguishing_features as feature, fi (feature)}
+											<li>
+												<label>
+													<input
+														type="checkbox"
+														checked={checklist[checklistKey(ci, fi)] ?? false}
+														onchange={(e) =>
+															(checklist[checklistKey(ci, fi)] = (
+																e.currentTarget as HTMLInputElement
+															).checked)}
+													/>
+													{feature}
+												</label>
+											</li>
+										{/each}
+									</ul>
+								{/if}
+							</li>
+						{/each}
+					</ul>
+				{/if}
+
+				<p class="safety-notes muted small">{dd.safety_notes}</p>
+			</section>
+		{/if}
+
+		{#if lightboxPhotoId}
+			<div
+				class="lightbox"
+				role="button"
+				tabindex="0"
+				aria-label="Close full-size photo"
+				onclick={() => (lightboxPhotoId = null)}
+				onkeydown={(e) => e.key === 'Escape' && (lightboxPhotoId = null)}
+			>
+				<PhotoImg photoId={lightboxPhotoId} alt="Full-size specimen photo" class="lightbox-img" />
+			</div>
+		{/if}
+
+		{#if cameraOpen}
+			<CameraCapture
+				ondone={onCameraDone}
+				oncancel={onCameraCancel}
+				onunavailable={onCameraUnavailable}
+			/>
+		{/if}
+	</svelte:boundary>
 {/if}
 
 <style>

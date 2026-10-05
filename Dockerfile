@@ -6,6 +6,10 @@ WORKDIR /app/web
 COPY web/package.json web/package-lock.json ./
 RUN npm ci
 COPY web/ ./
+# Short commit SHA baked into the build (shown in the UI footer) so "are you
+# actually running the latest build" is never a guessing game when debugging.
+ARG GIT_SHA=dev
+ENV PUBLIC_BUILD_SHA=$GIT_SHA
 RUN npm run build
 
 # ---- backend build ---------------------------------------------------------

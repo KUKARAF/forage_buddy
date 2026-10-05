@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { onDestroy } from 'svelte';
+	import { onDestroy, onMount } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { resolve } from '$app/paths';
 	import { createSighting, uploadPhoto, ApiError } from '$lib/api/client';
@@ -28,7 +28,6 @@
 
 	let cameraOpen = $state(false);
 	let cameraUnavailableMessage = $state<string | null>(null);
-	let fallbackInput: HTMLInputElement | undefined = $state();
 	let galleryInput: HTMLInputElement | undefined = $state();
 
 	function addFiles(files: File[]) {
@@ -44,24 +43,17 @@
 		pendingPhotos.splice(idx, 1);
 	}
 
-	// In the Android app, `getUserMedia` never actually works (the Tauri
-	// Android WebView doesn't bridge its permission prompt to a real Android
-	// runtime grant — see docs/ARCHITECTURE.md / the camera-UX follow-up
-	// notes), so trying it first and falling back to the file input only
-	// AFTER an async rejection is worse than useless there: by the time the
-	// rejection lands, the click that opened this is no longer a "trusted"
-	// synchronous user gesture, and some WebViews silently refuse to honor a
-	// programmatic `.click()` on a file input outside that window — which is
-	// exactly what "the camera button does nothing" looks like. So in the
-	// app build, skip the live-camera attempt entirely and go straight to
-	// the proven-reliable `<input capture>` system-camera handoff, triggered
-	// synchronously from the real tap. The web build still gets the nicer
-	// in-app live camera, where getUserMedia works normally.
+	// There is no reliable in-app camera on Android today: the WebView's
+	// onShowFileChooser doesn't honor <input capture> the way a full browser
+	// does (it always opens the generic picker, confirmed on-device), and
+	// getUserMedia can't get a real permission grant either (Tauri's Android
+	// webview doesn't bridge it). Rather than ship a "Take a photo" button
+	// that silently opens a photo picker instead, the app build only offers
+	// the picker directly (take the photo with the regular camera app, then
+	// pick it here) — no misleading camera affordance. The web build keeps
+	// the nice in-app live camera via getUserMedia, which works normally in
+	// an ordinary browser.
 	function openCamera() {
-		if (IS_APP) {
-			fallbackInput?.click();
-			return;
-		}
 		cameraUnavailableMessage = null;
 		cameraOpen = true;
 	}
@@ -77,11 +69,11 @@
 
 	function onCameraUnavailable() {
 		cameraOpen = false;
-		cameraUnavailableMessage = 'Camera not available — choose or take a photo instead.';
-		fallbackInput?.click();
+		cameraUnavailableMessage = 'Camera not available — choose a photo instead.';
+		galleryInput?.click();
 	}
 
-	function onFallbackChange(e: Event) {
+	function onGalleryChange(e: Event) {
 		const input = e.currentTarget as HTMLInputElement;
 		const files = input.files ? Array.from(input.files) : [];
 		input.value = '';
@@ -104,6 +96,15 @@
 			locating = false;
 		}
 	}
+
+	// Auto-fill location on open instead of making the user tap a button —
+	// this is a field tool, location should just be there. Still fully
+	// optional/editable: failure (denied, services off, no fix yet) just
+	// leaves the "Use my location" button available as a manual retry,
+	// same as before.
+	onMount(() => {
+		void useMyLocation();
+	});
 
 	function clearLocation() {
 		location = null;
@@ -176,37 +177,30 @@
 		{/if}
 
 		<div class="capture-actions">
-			<button type="button" class="btn" onclick={openCamera}>📷 Take a photo</button>
-			<button type="button" class="btn secondary" onclick={() => galleryInput?.click()}>
-				🖼️ Choose photo(s)
-			</button>
+			{#if !IS_APP}
+				<button type="button" class="btn" onclick={openCamera}>📷 Take a photo</button>
+				<button type="button" class="btn secondary" onclick={() => galleryInput?.click()}>
+					🖼️ Choose photo(s)
+				</button>
+			{:else}
+				<!-- No in-app camera on Android today (see the openCamera comment) —
+				     one honest action: take the photo with your camera app, then
+				     pick it here. -->
+				<button type="button" class="btn" onclick={() => galleryInput?.click()}>
+					📷 Add photo(s)
+				</button>
+			{/if}
 		</div>
 
-		<!-- Camera-capture input: the Android app's primary capture path
-		     (triggered directly, synchronously, from openCamera above), and the
-		     web build's automatic fallback when getUserMedia is unavailable/denied.
-		     Deliberately NOT `multiple` — Chrome/Android silently drops the
-		     `capture` hint (falling back to a generic file/gallery picker)
-		     when `multiple` is also set on the same input, which is exactly
-		     what broke "Take a photo" before. One shot per tap; tap again for
-		     more, same as any camera app. -->
-		<input
-			bind:this={fallbackInput}
-			class="visually-hidden"
-			type="file"
-			accept="image/*"
-			capture="environment"
-			onchange={onFallbackChange}
-		/>
-		<!-- Gallery/file picker, no camera hint — lets "Choose photo(s)" mean
-		     what it says instead of also launching the camera. -->
+		<!-- Gallery/file picker. Also the web build's fallback when getUserMedia
+		     is unavailable/denied. -->
 		<input
 			bind:this={galleryInput}
 			class="visually-hidden"
 			type="file"
 			accept="image/*"
 			multiple
-			onchange={onFallbackChange}
+			onchange={onGalleryChange}
 		/>
 
 		{#if cameraUnavailableMessage}

@@ -50,6 +50,8 @@ jobs:
         with:
           context: .
           push: true
+          build-args: |
+            GIT_SHA=${{ github.sha }}
           tags: |
             ghcr.io/kukaraf/forage_buddy:latest
             ghcr.io/kukaraf/forage_buddy:${{ github.sha }}
