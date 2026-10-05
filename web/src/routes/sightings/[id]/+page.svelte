@@ -192,15 +192,18 @@
 				</button>
 			{/each}
 		</div>
-		<!-- Camera-preferring input: the Android app's primary capture path
+		<!-- Camera-capture input: the Android app's primary capture path
 		     (triggered directly, synchronously, from openCamera below), and the
-		     web build's automatic fallback when getUserMedia is unavailable/denied. -->
+		     web build's automatic fallback when getUserMedia is unavailable/denied.
+		     Deliberately NOT `multiple` — Chrome/Android silently drops the
+		     `capture` hint (falling back to a generic file/gallery picker) when
+		     `multiple` is also set on the same input, which is exactly what
+		     broke "Take a photo" before. One shot per tap; tap again for more. -->
 		<input
 			bind:this={addPhotoInput}
 			type="file"
 			accept="image/*"
 			capture="environment"
-			multiple
 			class="visually-hidden"
 			onchange={onAddPhoto}
 		/>
