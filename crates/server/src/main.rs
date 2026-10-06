@@ -28,7 +28,18 @@ use tower_sessions_sqlx_store::SqliteStore;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt::init();
+    // Bare `fmt::init()` doesn't reliably default to showing anything useful
+    // across tracing-subscriber versions when `RUST_LOG` is unset — which is
+    // exactly how a production deployment went completely silent (not even
+    // the startup line below ever printed) while nothing was actually wrong
+    // with the process. Explicit default: honor RUST_LOG when set, otherwise
+    // "info" so normal operation is always visible without extra config.
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .init();
 
     let config = Config::from_env();
     tracing::info!(bind_addr = %config.bind_addr, "starting forage_buddy server");
