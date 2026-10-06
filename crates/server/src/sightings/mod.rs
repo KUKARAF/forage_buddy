@@ -275,7 +275,6 @@ impl From<DeepDiveResultRow> for DeepDiveResultView {
 /// screen needs in one request.
 #[derive(Debug, Serialize)]
 pub struct SightingDetail {
-    #[serde(flatten)]
     pub sighting: Sighting,
     pub photos: Vec<PhotoView>,
     pub triage: Option<TriageResultView>,
@@ -953,6 +952,57 @@ mod tests {
             .await
             .expect_err("must be NotFound for a non-owner");
         assert!(matches!(err, AppError::NotFound));
+    }
+
+    /// Regression test for a real bug: `SightingDetail.sighting` was
+    /// `#[serde(flatten)]`ed, so the actual JSON response had no nested
+    /// "sighting" object at all -- its fields (id, place_label, observed_at,
+    /// ...) landed at the top level instead. The frontend's `SightingDetail`
+    /// type (and every `detail.sighting.*` template reference) expects a
+    /// genuinely nested object, matching docs/ARCHITECTURE.md's documented
+    /// contract. The Rust-level assertions in the test above never caught
+    /// this because they read `detail.sighting.id` as a struct field, which
+    /// works regardless of how it serializes -- only inspecting the actual
+    /// serialized JSON shape catches a `#[serde(flatten)]` mistake like this.
+    #[tokio::test]
+    async fn detail_serializes_sighting_as_a_nested_object_not_flattened() {
+        let (_dir, pool) = test_pool().await;
+        create_sibling_tables(&pool).await;
+
+        let sighting = insert_sighting(
+            &pool,
+            "u1",
+            None,
+            None,
+            None,
+            Some("Test Forest"),
+            "2026-03-01T10:00:00Z",
+            None,
+        )
+        .await
+        .expect("insert sighting");
+
+        let detail = build_sighting_detail(&pool, "u1", &sighting.id)
+            .await
+            .expect("detail");
+        let value = serde_json::to_value(&detail).expect("serialize detail");
+
+        assert_eq!(
+            value.get("place_label"),
+            None,
+            "sighting fields must NOT be flattened onto the top-level response"
+        );
+        assert_eq!(
+            value
+                .get("sighting")
+                .and_then(|s| s.get("place_label"))
+                .and_then(|v| v.as_str()),
+            Some("Test Forest"),
+            "sighting must be a nested object with its own fields"
+        );
+        assert!(value.get("photos").is_some());
+        assert!(value.get("triage").is_some());
+        assert!(value.get("deepdive").is_some());
     }
 
     #[test]
