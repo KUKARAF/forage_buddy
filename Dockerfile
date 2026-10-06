@@ -47,13 +47,12 @@ COPY --from=frontend /app/web/build /app/static
 ENV FORAGEBUDDY_SQLITE_PATH=/data/db/forage_buddy.db \
     FORAGEBUDDY_PHOTO_DIR=/data/photos \
     FORAGEBUDDY_STATIC_DIR=/app/static \
-    FORAGEBUDDY_BIND_ADDR=0.0.0.0:8080 \
-    RUST_LOG=info
+    FORAGEBUDDY_BIND_ADDR=0.0.0.0:8080
 
-# RUST_LOG defaults to "info" (see above) so `docker compose logs` always has
-# something in it. Override per-deployment via docker-compose.yml's
-# `environment:` if you need more/less verbosity (e.g. RUST_LOG=debug,
-# or RUST_LOG=info,server=debug for just this app's own target).
+# RUST_LOG is intentionally not defaulted here — set it via the deploy
+# infra's docker-compose `environment:` instead. main.rs's EnvFilter setup
+# honors it when set (e.g. RUST_LOG=info, or RUST_LOG=info,server=debug for
+# just this app's own target) and otherwise falls back to "info" itself.
 
 RUN mkdir -p /data/photos /data/db && chown -R foragebuddy:foragebuddy /data /app
 USER foragebuddy
