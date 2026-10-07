@@ -74,14 +74,22 @@ fn parse_common_names(json: &str) -> Vec<String> {
 }
 
 /// Fuzzy, case-insensitive match of `query` against a curated row: exact or
-/// substring match on genus, "Genus species", or any common name. Loose on
-/// purpose — the caller (deep-dive) is matching free-text LLM output like
-/// "Amanita phalloides (death cap)" or just a bare genus.
+/// substring match on "Genus species", a common name, or (only for a
+/// genus-only query — see below) genus alone. Loose on purpose — the caller
+/// (deep-dive) is matching free-text LLM output like "Amanita phalloides
+/// (death cap)" or just a bare genus.
+///
+/// Species-level matching is checked first and takes priority regardless of
+/// genus. Genus-only matching is gated on the *query* having no space (i.e.
+/// actually being genus-only), not on substring presence alone — a two-word
+/// query like "amanita muscaria" must never fall through to matching a
+/// *different* curated species sharing that genus (e.g. "Amanita
+/// phalloides") just because "amanita muscaria".contains("amanita"). That
+/// was a real, observed bug: looking up the correctly-identified "Amanita
+/// muscaria" (not itself in the curated seed data) silently returned the
+/// unrelated "Amanita phalloides" (death cap) row — wrong Wikipedia article,
+/// wrong confusant checklist, for a species that isn't even dangerous.
 fn row_matches(row: &SpeciesRow, query_lower: &str) -> bool {
-    if row.genus.to_lowercase() == query_lower || query_lower.contains(&row.genus.to_lowercase()) {
-        return true;
-    }
-
     if let Some(species) = &row.species {
         let full = format!("{} {}", row.genus, species).to_lowercase();
         if full == query_lower || query_lower.contains(&full) || full.contains(query_lower) {
@@ -89,14 +97,24 @@ fn row_matches(row: &SpeciesRow, query_lower: &str) -> bool {
         }
     }
 
-    parse_common_names(&row.common_names_json)
+    let common_name_match = parse_common_names(&row.common_names_json)
         .iter()
         .any(|name| {
             let name_lower = name.to_lowercase();
             name_lower == query_lower
                 || query_lower.contains(&name_lower)
                 || name_lower.contains(query_lower)
-        })
+        });
+    if common_name_match {
+        return true;
+    }
+
+    if !query_lower.contains(' ') {
+        let genus_lower = row.genus.to_lowercase();
+        return query_lower == genus_lower || query_lower.contains(&genus_lower);
+    }
+
+    false
 }
 
 fn to_species_reference_dto(row: &SpeciesRow) -> SpeciesReferenceDto {
@@ -322,6 +340,36 @@ mod tests {
         assert_eq!(
             found.wikipedia_title,
             Some("Amanita phalloides".to_string())
+        );
+    }
+
+    /// Regression test for a real, observed bug: looking up a species that
+    /// shares a genus with a curated row but is NOT itself curated (e.g.
+    /// "Amanita muscaria" — fly agaric, not in the seed data; only
+    /// phalloides/virosa/bisporigera are) must not silently fall back to a
+    /// DIFFERENT, unrelated curated species in that genus. Observed in
+    /// production-equivalent testing: querying the correctly-identified
+    /// "Amanita muscaria" returned the curated "Amanita phalloides" (death
+    /// cap) row — wrong Wikipedia title, wrong confusant checklist, for a
+    /// species that isn't even on the deadly_toxic list.
+    #[tokio::test]
+    async fn species_level_query_does_not_fall_back_to_a_different_species_in_the_same_genus() {
+        let (_dir, pool) = test_pool().await;
+
+        let found = lookup(&pool, "Amanita muscaria").await.unwrap();
+        assert!(
+            found.is_none(),
+            "Amanita muscaria isn't curated and must not resolve to a different Amanita species \
+             (got {found:?})"
+        );
+
+        let confusants = curated_confusants_for(&pool, "Amanita muscaria")
+            .await
+            .unwrap();
+        assert!(
+            confusants.is_empty(),
+            "must not return a different curated species' confusants for an uncurated species \
+             sharing its genus (got {confusants:?})"
         );
     }
 

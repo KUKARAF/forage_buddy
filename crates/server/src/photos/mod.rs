@@ -258,9 +258,39 @@ async fn load_photo_file(
 /// Called by the upload handler after the file is persisted and the row
 /// inserted. Fire-and-forget from the HTTP handler's point of view: spawned,
 /// logs failures, never fails the upload response on a triage error.
+///
+/// Also auto-triggers a deep dive once triage lands on a genus/species
+/// candidate (never on `insufficient`): the deep-dive's dangerous-look-alike
+/// checklist is the entire safety point of this app, not an optional extra,
+/// so it shouldn't require the user to know to press a second button. Only
+/// the FIRST such landing auto-triggers one — if the user adds more photos
+/// later and triage re-runs, a manual "Re-run deep dive" is still there for
+/// a fresh pass, but re-triggering automatically every time would silently
+/// re-run an expensive multi-call pipeline (Wikipedia fetch + embeddings +
+/// several LLM calls) on every single photo add.
 pub async fn on_photo_uploaded(state: AppState, sighting_id: String) {
-    if let Err(e) = crate::triage::run_triage(&state, &sighting_id).await {
-        tracing::error!(error = ?e, sighting_id, "triage run failed after photo upload");
+    let triage = match crate::triage::run_triage(&state, &sighting_id).await {
+        Ok(triage) => triage,
+        Err(e) => {
+            tracing::error!(error = ?e, sighting_id, "triage run failed after photo upload");
+            return;
+        }
+    };
+
+    if triage.status == forage_buddy_core::domain::TriageStatus::Insufficient {
+        return;
+    }
+
+    match crate::deepdive::has_any_result(&state.db, &sighting_id).await {
+        Ok(true) => {} // already has one; leave it for the user to manually re-run if desired
+        Ok(false) => {
+            if let Err(e) = crate::deepdive::run_deepdive(&state, &sighting_id).await {
+                tracing::error!(error = ?e, sighting_id, "auto-triggered deep dive failed");
+            }
+        }
+        Err(e) => {
+            tracing::error!(error = ?e, sighting_id, "checking for an existing deep dive failed");
+        }
     }
 }
 

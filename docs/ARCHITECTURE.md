@@ -77,7 +77,8 @@ Mirrors `ai_buddy`'s `AIBUDDY_*` naming exactly, module for module:
 | `FORAGEBUDDY_LLM_PROVIDER` | `litellm` | `litellm` or `openrouter` |
 | `FORAGEBUDDY_LITELLM_API_KEY` / `FORAGEBUDDY_LITELLM_BASE_URL` | unset / `https://litellm.osmosis.page/v1` | |
 | `FORAGEBUDDY_OPENROUTER_API_KEY` | unset | Used when provider=openrouter, and always for embeddings fallback per ai_buddy's logic |
-| `FORAGEBUDDY_CHAT_MODEL` | `openrouter/~anthropic/claude-haiku-latest` | Must be vision-capable — used for triage AND deep-dive |
+| `FORAGEBUDDY_CHAT_MODEL` | `openrouter/~anthropic/claude-haiku-latest` | Must be vision-capable — used for triage |
+| `FORAGEBUDDY_DEEPDIVE_MODEL` | same as `FORAGEBUDDY_CHAT_MODEL` | Model for deep-dive's confusant-enrichment and safety-notes synthesis — off triage's "need an answer in seconds" path, so a stronger/slower model than triage is a reasonable choice here |
 | `FORAGEBUDDY_ALLOWED_CHAT_MODELS` | same + `gemma4-26b` | comma-separated |
 | `FORAGEBUDDY_EMBEDDING_MODEL` / `FORAGEBUDDY_EMBEDDING_DIM` | `bge-m3` / `1024` | |
 | `FORAGEBUDDY_CORS_ORIGINS` | dev localhost + `http://tauri.localhost` | |
@@ -318,7 +319,14 @@ one `chat_json_vision` call, schema:
 }
 ```
 
-### 2. Deep dive (slower, user- or auto-triggered once a genus candidate exists)
+### 2. Deep dive (slower, auto-triggered the first time triage reaches a genus/species candidate)
+
+This is core safety functionality, not an optional extra behind a button —
+`photos::on_photo_uploaded` fires it automatically right after triage, the
+same way it fires triage itself after an upload (see the end of that
+function). It only auto-fires once per sighting (gated on
+`deepdive::has_any_result`); a manual "Re-run deep dive" stays available on
+the detail screen for re-running it later (e.g. after adding more photos).
 
 A short in-process pipeline of LLM calls (NOT separate processes — just
 named, narrowly-scoped calls, matching the "a few more subagents" framing

@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { onDestroy } from 'svelte';
 	import { page } from '$app/state';
 	import {
 		getSightingDetail,
@@ -67,6 +68,59 @@
 			loading = false;
 		}
 	}
+
+	// Triage, and then deep dive once triage lands on a real candidate, both
+	// run automatically server-side after a photo upload (see
+	// photos::on_photo_uploaded) — the look-alike/danger checklist is the
+	// entire safety point of this app, not an optional extra behind a
+	// button. Poll silently in the background (no full-page "Loading…"
+	// flash) while either is still expected, so results just appear.
+	let pollTimer: ReturnType<typeof setInterval> | undefined;
+	let polling = $state(false);
+	const POLL_INTERVAL_MS = 3000;
+	const POLL_GIVE_UP_MS = 150_000; // a bit above the backend's own 120s request budget
+
+	function awaitingAutoResults(d: SightingDetail | null): boolean {
+		if (!d) return false;
+		if (!d.triage) return true;
+		return d.triage.status !== 'insufficient' && !d.deepdive;
+	}
+
+	async function refreshSilently() {
+		try {
+			detail = await getSightingDetail(sightingId);
+		} catch {
+			// Best-effort background refresh; the "Try again" button on a real
+			// load failure (loadError) is the path for persistent errors, this
+			// is just a missed poll tick.
+		}
+	}
+
+	$effect(() => {
+		if (awaitingAutoResults(detail)) {
+			polling = true;
+			if (!pollTimer) {
+				const startedAt = Date.now();
+				pollTimer = setInterval(() => {
+					if (Date.now() - startedAt > POLL_GIVE_UP_MS) {
+						clearInterval(pollTimer);
+						pollTimer = undefined;
+						polling = false;
+						return;
+					}
+					void refreshSilently();
+				}, POLL_INTERVAL_MS);
+			}
+		} else if (pollTimer) {
+			clearInterval(pollTimer);
+			pollTimer = undefined;
+			polling = false;
+		}
+	});
+
+	onDestroy(() => {
+		if (pollTimer) clearInterval(pollTimer);
+	});
 
 	$effect(() => {
 		void load();
@@ -296,20 +350,26 @@
 			{/if}
 
 			<div class="deepdive-trigger">
-				<button
-					class="btn"
-					disabled={!canRunDeepDive || deepDiveLoading}
-					title={!canRunDeepDive
-						? 'Needs at least a genus candidate before a deep dive makes sense'
-						: ''}
-					onclick={runDeepDive}
-				>
-					{deepDiveLoading
-						? 'Running deep dive…'
-						: detail.deepdive
-							? 'Re-run deep dive'
-							: 'Run deep dive'}
-				</button>
+				{#if !canRunDeepDive}
+					<button
+						class="btn"
+						disabled
+						title="Needs at least a genus candidate before a deep dive makes sense"
+					>
+						Run deep dive
+					</button>
+				{:else if polling && !detail.deepdive && !deepDiveLoading}
+					<p class="muted small">🔎 Checking Wikipedia and known look-alikes automatically…</p>
+					<button class="btn secondary small-btn" onclick={runDeepDive}>Run now instead</button>
+				{:else}
+					<button class="btn" disabled={deepDiveLoading} onclick={runDeepDive}>
+						{deepDiveLoading
+							? 'Running deep dive…'
+							: detail.deepdive
+								? 'Re-run deep dive'
+								: 'Run deep dive'}
+					</button>
+				{/if}
 			</div>
 		</section>
 

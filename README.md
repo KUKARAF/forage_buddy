@@ -89,7 +89,8 @@ cd web && npm ci && npm run check && npm run build
 | `FORAGEBUDDY_LLM_PROVIDER` | `litellm` | `litellm` or `openrouter` |
 | `FORAGEBUDDY_LITELLM_API_KEY` / `FORAGEBUDDY_LITELLM_BASE_URL` | unset / `https://litellm.osmosis.page/v1` | |
 | `FORAGEBUDDY_OPENROUTER_API_KEY` | unset | Used when provider=openrouter, and always for embeddings fallback |
-| `FORAGEBUDDY_CHAT_MODEL` | `openrouter/~anthropic/claude-haiku-latest` | Must be vision-capable — used for triage AND deep-dive |
+| `FORAGEBUDDY_CHAT_MODEL` | `openrouter/~anthropic/claude-haiku-latest` | Must be vision-capable — used for triage |
+| `FORAGEBUDDY_DEEPDIVE_MODEL` | same as `FORAGEBUDDY_CHAT_MODEL` | Model for deep-dive's confusant-enrichment and safety-notes synthesis — not on triage's time-critical path, so a stronger/slower model is a reasonable choice |
 | `FORAGEBUDDY_ALLOWED_CHAT_MODELS` | same + `gemma4-26b` | comma-separated |
 | `FORAGEBUDDY_EMBEDDING_MODEL` / `FORAGEBUDDY_EMBEDDING_DIM` | `bge-m3` / `1024` | |
 | `FORAGEBUDDY_CORS_ORIGINS` | dev localhost + `http://tauri.localhost` | Comma-separated; replaces the list |

@@ -338,7 +338,7 @@ async fn find_extra_confusants(
         serde_json::json!({ "role": "user", "content": user }),
     ];
 
-    let model = state.llm.default_chat_model();
+    let model = state.llm.deepdive_chat_model();
 
     let first = match state.llm.chat_tools(model, messages.clone(), &tools).await {
         Ok(turn) => turn,
@@ -489,7 +489,7 @@ async fn synthesize_safety_notes(
          calling out the most dangerous look-alike(s) by name where useful."
     );
 
-    let model = state.llm.default_chat_model();
+    let model = state.llm.deepdive_chat_model();
     match state
         .llm
         .chat_json::<SynthesisOutput>(model, system, &user)
@@ -593,6 +593,21 @@ async fn persist(
     })
 }
 
+/// Whether any deep-dive attempt has ever been persisted for this sighting.
+/// Used to decide whether to auto-trigger one after triage lands on a
+/// non-insufficient result — auto-triggering should happen once, not on
+/// every subsequent triage re-run as the user adds more photos (a manual
+/// "Re-run deep dive" stays available for that).
+pub async fn has_any_result(db: &SqlitePool, sighting_id: &str) -> AppResult<bool> {
+    let row: Option<(i64,)> =
+        sqlx::query_as("SELECT 1 FROM deepdive_results WHERE sighting_id = ? LIMIT 1")
+            .bind(sighting_id)
+            .fetch_optional(db)
+            .await
+            .map_err(|e| AppError::Internal(e.into()))?;
+    Ok(row.is_some())
+}
+
 /// Run the full deep-dive pipeline for a sighting and persist a new attempt.
 /// `NotFound` when the sighting has no triage attempt yet; `BadRequest` when
 /// the latest triage attempt is still `"insufficient"`.
@@ -637,7 +652,7 @@ pub async fn run_deepdive(state: &AppState, sighting_id: &str) -> AppResult<Deep
     persist(
         &state.db,
         sighting_id,
-        state.llm.default_chat_model(),
+        state.llm.deepdive_chat_model(),
         &best_match_species,
         confidence,
         wiki_page.as_ref(),

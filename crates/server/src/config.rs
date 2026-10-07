@@ -38,9 +38,14 @@ pub struct Config {
     pub openrouter_api_key: Option<String>,
     pub litellm_api_key: Option<String>,
     pub litellm_base_url: String,
-    /// Default chat model — MUST be vision-capable (used for triage AND
-    /// deep-dive text calls).
+    /// Default chat model — MUST be vision-capable (used for triage).
     pub chat_model: String,
+    /// Model for deep-dive's confusant-enrichment tool calls and the final
+    /// safety-notes synthesis — the user-facing safety report, and not on
+    /// triage's "need an answer in seconds" critical path, so a stronger
+    /// (slower/costlier) model than triage is a reasonable choice here.
+    /// Defaults to `chat_model` when unset, so this is opt-in, not required.
+    pub deepdive_chat_model: String,
     pub allowed_chat_models: Vec<String>,
     pub embedding_model: String,
     pub embedding_dim: usize,
@@ -69,6 +74,12 @@ impl Config {
     pub fn from_env() -> Self {
         let base_url = std::env::var("FORAGEBUDDY_BASE_URL")
             .unwrap_or_else(|_| DEV_DEFAULT_BASE_URL.to_string());
+        let chat_model = std::env::var("FORAGEBUDDY_CHAT_MODEL")
+            .unwrap_or_else(|_| "openrouter/~anthropic/claude-haiku-latest".to_string());
+        let deepdive_chat_model = std::env::var("FORAGEBUDDY_DEEPDIVE_MODEL")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| chat_model.clone());
 
         Self {
             authentik_issuer_url: std::env::var("FORAGEBUDDY_AUTHENTIK_ISSUER_URL").unwrap_or_else(
@@ -130,8 +141,8 @@ impl Config {
                 .ok()
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| "https://litellm.osmosis.page/v1".to_string()),
-            chat_model: std::env::var("FORAGEBUDDY_CHAT_MODEL")
-                .unwrap_or_else(|_| "openrouter/~anthropic/claude-haiku-latest".to_string()),
+            chat_model,
+            deepdive_chat_model,
             allowed_chat_models: std::env::var("FORAGEBUDDY_ALLOWED_CHAT_MODELS")
                 .ok()
                 .map(|v| {

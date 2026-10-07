@@ -38,6 +38,14 @@ use crate::error::{AppError, AppResult};
 const OPENROUTER_CHAT_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
 const OPENROUTER_EMBED_URL: &str = "https://openrouter.ai/api/v1/embeddings";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+/// Embeddings are called in a loop (once per Wikipedia chunk during
+/// deep-dive's grounding step) and are supposed to be small/fast — unlike
+/// chat/vision/tool calls, a single stalled embed call must not be allowed
+/// to eat the shared 60s client timeout, since several of those in a row
+/// would blow through the server's own 120s per-request budget
+/// (routes.rs's TimeoutLayer) before deep-dive's own warn-and-skip
+/// resilience (see deepdive/mod.rs) ever gets a chance to move on.
+const EMBED_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// A single tool/function call requested by the model in a [`ToolTurn`].
 #[derive(Debug, Clone, PartialEq)]
@@ -72,6 +80,10 @@ struct Inner {
     chat_api_key: Option<String>,
     /// Default chat model when the caller passes an unknown/empty model.
     default_chat_model: String,
+    /// Model for deep-dive's confusant-enrichment and safety-notes-synthesis
+    /// calls — see `Config::deepdive_chat_model`'s doc comment. Falls back to
+    /// `default_chat_model` when `FORAGEBUDDY_DEEPDIVE_MODEL` is unset.
+    deepdive_chat_model: String,
     /// Chat model ids a caller may select.
     allowed_chat_models: Vec<String>,
     /// Full embeddings URL (provider-dependent).
@@ -137,6 +149,7 @@ impl LlmClient {
                 chat_url,
                 chat_api_key,
                 default_chat_model: config.chat_model.clone(),
+                deepdive_chat_model: config.deepdive_chat_model.clone(),
                 allowed_chat_models: config.allowed_chat_models.clone(),
                 embed_url,
                 embed_api_key,
@@ -149,6 +162,12 @@ impl LlmClient {
     /// The configured default chat model.
     pub fn default_chat_model(&self) -> &str {
         &self.inner.default_chat_model
+    }
+
+    /// The configured deep-dive chat model (falls back to the default chat
+    /// model when `FORAGEBUDDY_DEEPDIVE_MODEL` is unset).
+    pub fn deepdive_chat_model(&self) -> &str {
+        &self.inner.deepdive_chat_model
     }
 
     /// Resolve a requested model to a usable one: return `requested` when it
@@ -316,6 +335,7 @@ impl LlmClient {
             .http
             .post(&self.inner.embed_url)
             .bearer_auth(key)
+            .timeout(EMBED_REQUEST_TIMEOUT)
             .json(&body)
             .send()
             .await
