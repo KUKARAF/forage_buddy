@@ -38,14 +38,23 @@ pub struct Config {
     pub openrouter_api_key: Option<String>,
     pub litellm_api_key: Option<String>,
     pub litellm_base_url: String,
-    /// Default chat model — MUST be vision-capable (used for triage).
+    /// Default model for gatherer 1 (candidate species guess from photos) —
+    /// MUST be vision-capable. Each of these four `*_chat_model` fields is
+    /// only the fallback used when `model_settings` (see the `settings`
+    /// module) has no override for that gatherer — the live, effective
+    /// choice is runtime-editable via `GET`/`PUT /api/settings` and the web
+    /// Settings page, not fixed at boot.
     pub chat_model: String,
-    /// Model for the identification pipeline's facts/risks gatherers
-    /// (species facts lookup + confusant-enrichment tool calls) — these run
-    /// off the vision gatherer's "need an answer in seconds" critical path,
-    /// so a stronger (slower/costlier) model is a reasonable choice here.
-    /// Defaults to `chat_model` when unset, so this is opt-in, not required.
-    pub identification_chat_model: String,
+    /// Default model for gatherer 2 (per-candidate Wikipedia facts lookup:
+    /// edible/medicinal/psychoactive/poisonous + risk note). Text-only.
+    pub facts_chat_model: String,
+    /// Default model for gatherer 3 (confusant/look-alike risk lookup via
+    /// tool-calling). Must support tool-calling.
+    pub risk_chat_model: String,
+    /// Default model for gatherer 4 (visual match: compares the forager's
+    /// photo against a fetched Wikipedia reference photo of the top
+    /// candidate) — MUST be vision-capable.
+    pub visual_match_chat_model: String,
     pub allowed_chat_models: Vec<String>,
     pub embedding_model: String,
     pub embedding_dim: usize,
@@ -75,11 +84,21 @@ impl Config {
         let base_url = std::env::var("FORAGEBUDDY_BASE_URL")
             .unwrap_or_else(|_| DEV_DEFAULT_BASE_URL.to_string());
         let chat_model = std::env::var("FORAGEBUDDY_CHAT_MODEL")
-            .unwrap_or_else(|_| "openrouter/~anthropic/claude-haiku-latest".to_string());
-        let identification_chat_model = std::env::var("FORAGEBUDDY_IDENTIFICATION_MODEL")
             .ok()
             .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| chat_model.clone());
+            .unwrap_or_else(|| "openrouter/~google/gemini-flash-latest".to_string());
+        let facts_chat_model = std::env::var("FORAGEBUDDY_FACTS_MODEL")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "openrouter/~anthropic/claude-haiku-latest".to_string());
+        let risk_chat_model = std::env::var("FORAGEBUDDY_RISK_MODEL")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "openrouter/~google/gemini-flash-latest".to_string());
+        let visual_match_chat_model = std::env::var("FORAGEBUDDY_VISUAL_MATCH_MODEL")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "openrouter/~google/gemini-flash-latest".to_string());
 
         Self {
             authentik_issuer_url: std::env::var("FORAGEBUDDY_AUTHENTIK_ISSUER_URL").unwrap_or_else(
@@ -142,7 +161,9 @@ impl Config {
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| "https://litellm.osmosis.page/v1".to_string()),
             chat_model,
-            identification_chat_model,
+            facts_chat_model,
+            risk_chat_model,
+            visual_match_chat_model,
             allowed_chat_models: std::env::var("FORAGEBUDDY_ALLOWED_CHAT_MODELS")
                 .ok()
                 .map(|v| {
@@ -155,6 +176,9 @@ impl Config {
                 .unwrap_or_else(|| {
                     vec![
                         "openrouter/~anthropic/claude-haiku-latest".to_string(),
+                        "openrouter/~google/gemini-flash-latest".to_string(),
+                        "openrouter/~anthropic/claude-sonnet-latest".to_string(),
+                        "openrouter/~google/gemini-pro-latest".to_string(),
                         "gemma4-26b".to_string(),
                     ]
                 }),

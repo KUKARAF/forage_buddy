@@ -80,10 +80,6 @@ struct Inner {
     chat_api_key: Option<String>,
     /// Default chat model when the caller passes an unknown/empty model.
     default_chat_model: String,
-    /// Model for the identification pipeline's facts/risks gatherers — see
-    /// `Config::identification_chat_model`'s doc comment. Falls back to
-    /// `default_chat_model` when `FORAGEBUDDY_IDENTIFICATION_MODEL` is unset.
-    identification_chat_model: String,
     /// Chat model ids a caller may select.
     allowed_chat_models: Vec<String>,
     /// Full embeddings URL (provider-dependent).
@@ -149,7 +145,6 @@ impl LlmClient {
                 chat_url,
                 chat_api_key,
                 default_chat_model: config.chat_model.clone(),
-                identification_chat_model: config.identification_chat_model.clone(),
                 allowed_chat_models: config.allowed_chat_models.clone(),
                 embed_url,
                 embed_api_key,
@@ -162,12 +157,6 @@ impl LlmClient {
     /// The configured default chat model.
     pub fn default_chat_model(&self) -> &str {
         &self.inner.default_chat_model
-    }
-
-    /// The configured identification-pipeline chat model (falls back to the
-    /// default chat model when `FORAGEBUDDY_IDENTIFICATION_MODEL` is unset).
-    pub fn identification_chat_model(&self) -> &str {
-        &self.inner.identification_chat_model
     }
 
     /// Resolve a requested model to a usable one: return `requested` when it
@@ -490,7 +479,7 @@ mod tests {
         // The config default is always allowed.
         assert_eq!(
             client.default_chat_model(),
-            "openrouter/~anthropic/claude-haiku-latest"
+            "openrouter/~google/gemini-flash-latest"
         );
         // An allowed model is returned as-is.
         assert_eq!(client.resolve_model(Some("gemma4-26b")), "gemma4-26b");

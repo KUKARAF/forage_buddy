@@ -39,6 +39,11 @@ pub struct WikipediaPage {
     pub pageid: Option<i64>,
     pub url: String,
     pub extract: String,
+    /// A representative photo for the page (REST summary's `thumbnail`,
+    /// falling back to `originalimage`), if the page has one. Used by
+    /// `identification::verify_visual_match` to fetch a real reference
+    /// photo of the identified species.
+    pub image_url: Option<String>,
 }
 
 /// Build the `reqwest::Client` this module's HTTP calls use. Deliberately
@@ -139,33 +144,36 @@ pub fn chunk_extract(text: &str) -> Vec<String> {
 }
 
 async fn load_cached(db: &SqlitePool, title: &str) -> AppResult<Option<WikipediaPage>> {
-    let row: Option<(Option<i64>, String, String)> =
-        sqlx::query_as("SELECT pageid, url, extract FROM wikipedia_pages WHERE title = ?")
-            .bind(title)
-            .fetch_optional(db)
-            .await
-            .map_err(|e| AppError::Internal(e.into()))?;
+    let row: Option<(Option<i64>, String, String, Option<String>)> = sqlx::query_as(
+        "SELECT pageid, url, extract, image_url FROM wikipedia_pages WHERE title = ?",
+    )
+    .bind(title)
+    .fetch_optional(db)
+    .await
+    .map_err(|e| AppError::Internal(e.into()))?;
 
-    Ok(row.map(|(pageid, url, extract)| WikipediaPage {
+    Ok(row.map(|(pageid, url, extract, image_url)| WikipediaPage {
         title: title.to_string(),
         pageid,
         url,
         extract,
+        image_url,
     }))
 }
 
 async fn store_cached(db: &SqlitePool, page: &WikipediaPage) -> AppResult<()> {
     sqlx::query(
-        "INSERT INTO wikipedia_pages (title, pageid, url, extract, fetched_at) \
-         VALUES (?, ?, ?, ?, datetime('now')) \
+        "INSERT INTO wikipedia_pages (title, pageid, url, extract, image_url, fetched_at) \
+         VALUES (?, ?, ?, ?, ?, datetime('now')) \
          ON CONFLICT(title) DO UPDATE SET \
              pageid = excluded.pageid, url = excluded.url, extract = excluded.extract, \
-             fetched_at = excluded.fetched_at",
+             image_url = excluded.image_url, fetched_at = excluded.fetched_at",
     )
     .bind(&page.title)
     .bind(page.pageid)
     .bind(&page.url)
     .bind(&page.extract)
+    .bind(&page.image_url)
     .execute(db)
     .await
     .map_err(|e| AppError::Internal(e.into()))?;
@@ -183,6 +191,15 @@ struct SummaryResponse {
     extract: String,
     #[serde(default)]
     content_urls: Option<ContentUrls>,
+    #[serde(default)]
+    thumbnail: Option<ImageSource>,
+    #[serde(default)]
+    originalimage: Option<ImageSource>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ImageSource {
+    source: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -256,11 +273,17 @@ async fn fetch_live(http: &reqwest::Client, title: &str) -> anyhow::Result<Optio
         .and_then(|d| d.page.clone())
         .unwrap_or_else(|| default_page_url(&body.title));
 
+    let image_url = body
+        .thumbnail
+        .map(|t| t.source)
+        .or_else(|| body.originalimage.map(|o| o.source));
+
     Ok(Some(WikipediaPage {
         title: body.title,
         pageid: body.pageid,
         url: page_url,
         extract: body.extract,
+        image_url,
     }))
 }
 
@@ -315,6 +338,7 @@ mod tests {
             title: "Amanita phalloides".to_string(),
             pageid: Some(42),
             url: "https://en.wikipedia.org/wiki/Amanita_phalloides".to_string(),
+            image_url: Some("https://example.com/amanita.jpg".to_string()),
             extract: "The death cap is a deadly poisonous mushroom.".to_string(),
         };
         store_cached(&pool, &page).await.unwrap();

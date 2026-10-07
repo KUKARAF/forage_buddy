@@ -94,9 +94,17 @@ cd web && npm ci && npm run check && npm run build
 | `FORAGEBUDDY_LLM_PROVIDER` | `litellm` | `litellm` or `openrouter` |
 | `FORAGEBUDDY_LITELLM_API_KEY` / `FORAGEBUDDY_LITELLM_BASE_URL` | unset / `https://litellm.osmosis.page/v1` | |
 | `FORAGEBUDDY_OPENROUTER_API_KEY` | unset | Used when provider=openrouter, and always for embeddings fallback |
-| `FORAGEBUDDY_CHAT_MODEL` | `openrouter/~anthropic/claude-haiku-latest` | Must be vision-capable — used by the identification pipeline's candidate-gathering pass |
-| `FORAGEBUDDY_IDENTIFICATION_MODEL` | same as `FORAGEBUDDY_CHAT_MODEL` | Model for the identification pipeline's facts + risks gatherers — off the candidate gatherer's time-critical path, so a stronger/slower model is a reasonable choice |
-| `FORAGEBUDDY_ALLOWED_CHAT_MODELS` | same + `gemma4-26b` | comma-separated |
+| `FORAGEBUDDY_CHAT_MODEL` | `openrouter/~google/gemini-flash-latest` | Vision-capable — default for gatherer 1 (candidate species guess) |
+| `FORAGEBUDDY_FACTS_MODEL` | `openrouter/~anthropic/claude-haiku-latest` | Default for gatherer 2 (Wikipedia facts: edible/medicinal/psychoactive/poisonous) |
+| `FORAGEBUDDY_RISK_MODEL` | `openrouter/~google/gemini-flash-latest` | Tool-calling-capable — default for gatherer 3 (confusant/look-alike risk lookup) |
+| `FORAGEBUDDY_VISUAL_MATCH_MODEL` | `openrouter/~google/gemini-flash-latest` | Vision-capable — default for gatherer 4 (compares the forager's photo to a Wikipedia reference photo) |
+| `FORAGEBUDDY_ALLOWED_CHAT_MODELS` | 5 curated models (haiku/gemini-flash/sonnet/gemini-pro/gemma4-26b) | comma-separated; also the Settings page's dropdown options |
+
+The four `*_MODEL` vars above are only the **defaults**. The live, effective
+model per gatherer is runtime-editable — no restart needed — via
+`GET`/`PUT /api/settings` or the web app's Settings page (⚙ link in the
+header), which overrides these defaults per-gatherer and persists in the
+`model_settings` table.
 | `FORAGEBUDDY_EMBEDDING_MODEL` / `FORAGEBUDDY_EMBEDDING_DIM` | `bge-m3` / `1024` | |
 | `FORAGEBUDDY_CORS_ORIGINS` | dev localhost + `http://tauri.localhost` | Comma-separated; replaces the list |
 | `FORAGEBUDDY_MAX_PHOTO_BYTES` | `15728640` (15 MiB) | per-photo upload cap before resize |
@@ -115,6 +123,9 @@ cd web && npm ci && npm run check && npm run build
   weather (temp/precipitation/wind/humidity) for a location, via Open-Meteo's
   free Archive API. Groundwork for future season/weather-aware foraging
   suggestions; not surfaced in the UI yet.
+- **Settings:** `GET /api/settings` / `PUT /api/settings` — the effective
+  (DB-override-or-default) model for each of the 4 identification gatherers,
+  plus `available_models` for the Settings page's dropdowns.
 
 Every error response is `{"message": "..."}`. Full request/response shapes and the
 identification pipeline design: **`docs/ARCHITECTURE.md`**.

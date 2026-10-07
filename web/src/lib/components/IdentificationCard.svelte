@@ -54,6 +54,21 @@
 		<p class="risk-note">{candidate.risk_note}</p>
 	{/if}
 
+	{#if candidate.visual_match !== null}
+		<div class="visual-match">
+			{#if candidate.visual_match}
+				<span class="visual-match-badge tone-green">✅ Matches Wikipedia photo</span>
+			{:else}
+				<span class="visual-match-badge tone-amber"
+					>⚠️ Doesn't look like the Wikipedia reference photo — worth a second look</span
+				>
+			{/if}
+			{#if candidate.visual_match_note}
+				<p class="visual-match-note muted small">{candidate.visual_match_note}</p>
+			{/if}
+		</div>
+	{/if}
+
 	{#if candidate.wikipedia_url}
 		<a
 			class="wiki-link"
@@ -140,6 +155,32 @@
 		margin: 0 0 8px;
 		font-size: 13.5px;
 		color: var(--ink);
+	}
+
+	.visual-match {
+		margin-bottom: 8px;
+	}
+	.visual-match-badge {
+		display: inline-flex;
+		align-items: center;
+		gap: 5px;
+		font-weight: 700;
+		font-size: 12.5px;
+		letter-spacing: 0.01em;
+		padding: 4px 10px;
+		border-radius: 999px;
+		white-space: nowrap;
+	}
+	.visual-match-badge.tone-green {
+		background: var(--green-bg);
+		color: var(--green);
+	}
+	.visual-match-badge.tone-amber {
+		background: var(--amber-bg);
+		color: var(--amber);
+	}
+	.visual-match-note {
+		margin: 4px 0 0;
 	}
 
 	.wiki-link {

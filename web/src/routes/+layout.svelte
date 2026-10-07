@@ -79,6 +79,7 @@
 	});
 
 	const home = resolve('/');
+	const settings = resolve('/settings');
 	const path = $derived(page.url.pathname);
 </script>
 
@@ -100,6 +101,9 @@
 			<div class="topbar-right">
 				{#if path !== home}
 					<a class="back" href={home}>← All sightings</a>
+				{/if}
+				{#if path !== settings}
+					<a class="settings-link" href={settings} aria-label="Settings">⚙ Settings</a>
 				{/if}
 				<ThemeToggle />
 			</div>
@@ -164,6 +168,14 @@
 		color: var(--muted);
 	}
 	.back:hover {
+		color: var(--accent);
+	}
+	.settings-link {
+		font-weight: 600;
+		font-size: 14px;
+		color: var(--muted);
+	}
+	.settings-link:hover {
 		color: var(--accent);
 	}
 

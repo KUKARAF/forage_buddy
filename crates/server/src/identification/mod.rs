@@ -193,6 +193,17 @@ pub struct IdentificationCandidateDto {
     pub wikipedia_url: Option<String>,
     pub risk_note: String,
     pub confusants: Vec<ConfusantSummaryDto>,
+    /// Only ever populated for the top-confidence candidate (index 0):
+    /// whether a vision model judged the forager's own photo to match a
+    /// fetched Wikipedia reference photo of this species. `None` means "not
+    /// checked" (no reference photo available, or the check failed) — not
+    /// "no match". `#[serde(default)]`: rows persisted before this field
+    /// existed (including the `0011` backfill of old triage/deepdive data)
+    /// have no such key in their stored `candidates_json`.
+    #[serde(default)]
+    pub visual_match: Option<bool>,
+    #[serde(default)]
+    pub visual_match_note: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -222,6 +233,10 @@ pub struct CandidateGatherResult {
     pub photos_considered: i64,
     pub candidates: Vec<Candidate>,
     pub missing_info: Vec<String>,
+    /// The same base64 data-URL-encoded photos sent to the vision model,
+    /// kept around so `verify_visual_match` can reuse one without
+    /// re-reading it from disk.
+    pub images: Vec<String>,
 }
 
 /// Per-species facts gathered by [`gather_facts`]. `Default` represents
@@ -230,6 +245,10 @@ pub struct CandidateGatherResult {
 #[derive(Debug, Clone, Default)]
 pub struct SpeciesFacts {
     pub wikipedia_url: Option<String>,
+    /// A representative Wikipedia photo of the species, if one was found —
+    /// the reference image `verify_visual_match` compares the forager's own
+    /// photo against.
+    pub wikipedia_image_url: Option<String>,
     pub edible: Option<bool>,
     pub medicinal: Option<bool>,
     pub psychoactive: Option<bool>,
@@ -244,6 +263,13 @@ pub struct EnrichedCandidate {
     pub candidate: Candidate,
     pub facts: SpeciesFacts,
     pub confusants: Vec<ConfusantSummaryDto>,
+    /// Set only for the single top-confidence candidate, by
+    /// `verify_visual_match`: `Some(true/false)` if a Wikipedia reference
+    /// photo was found and compared against the forager's own photo,
+    /// `None` if nothing was checked (no reference photo, or the check
+    /// failed) — `None` means "not checked", not "no match".
+    pub visual_match: Option<bool>,
+    pub visual_match_note: String,
 }
 
 impl EnrichedCandidate {
@@ -252,6 +278,8 @@ impl EnrichedCandidate {
             candidate,
             facts: SpeciesFacts::default(),
             confusants: Vec::new(),
+            visual_match: None,
+            visual_match_note: String::new(),
         }
     }
 }
@@ -393,6 +421,8 @@ pub fn compile_candidates(
                     wikipedia_url: cf.wikipedia_url,
                 })
                 .collect(),
+            visual_match: ec.visual_match,
+            visual_match_note: truncate_chars(ec.visual_match_note.trim(), RISK_NOTE_MAX_CHARS),
         })
         .collect()
 }
@@ -504,6 +534,7 @@ pub async fn gather_candidates(
             photos_considered: 0,
             candidates: Vec::new(),
             missing_info: vec!["at least one photo".to_string()],
+            images: Vec::new(),
         });
     }
 
@@ -542,6 +573,7 @@ pub async fn gather_candidates(
                 could not be read)"
                     .to_string(),
             ],
+            images: Vec::new(),
         });
     }
 
@@ -579,7 +611,9 @@ pub async fn gather_candidates(
     ));
     let user_text = user_text_parts.join("\n\n");
 
-    let model = state.llm.default_chat_model().to_string();
+    let model = crate::settings::effective_models(&state.db, &state.config)
+        .await
+        .candidate_model;
     let llm_output: CandidatesLlmOutput = state
         .llm
         .chat_json_vision(&model, CANDIDATES_SYSTEM_PROMPT, &user_text, &images)
@@ -598,6 +632,7 @@ pub async fn gather_candidates(
             })
             .collect(),
         missing_info: llm_output.missing_info,
+        images,
     })
 }
 
@@ -606,6 +641,7 @@ pub async fn gather_candidates(
 #[derive(sqlx::FromRow)]
 struct FactsCacheRow {
     wikipedia_url: Option<String>,
+    wikipedia_image_url: Option<String>,
     edible: Option<i64>,
     medicinal: Option<i64>,
     psychoactive: Option<i64>,
@@ -623,7 +659,8 @@ fn bool_to_int(v: Option<bool>) -> Option<i64> {
 
 async fn load_cached_facts(db: &SqlitePool, key: &str) -> AppResult<Option<SpeciesFacts>> {
     let row: Option<FactsCacheRow> = sqlx::query_as(
-        "SELECT wikipedia_url, edible, medicinal, psychoactive, poisonous, risk_note \
+        "SELECT wikipedia_url, wikipedia_image_url, edible, medicinal, psychoactive, poisonous, \
+                risk_note \
          FROM species_facts_cache WHERE species_key = ?",
     )
     .bind(key)
@@ -633,6 +670,7 @@ async fn load_cached_facts(db: &SqlitePool, key: &str) -> AppResult<Option<Speci
 
     Ok(row.map(|r| SpeciesFacts {
         wikipedia_url: r.wikipedia_url,
+        wikipedia_image_url: r.wikipedia_image_url,
         edible: int_to_bool(r.edible),
         medicinal: int_to_bool(r.medicinal),
         psychoactive: int_to_bool(r.psychoactive),
@@ -652,11 +690,13 @@ async fn store_cached_facts(
 ) -> AppResult<()> {
     sqlx::query(
         "INSERT INTO species_facts_cache \
-             (species_key, wikipedia_title, wikipedia_url, edible, medicinal, psychoactive, \
-              poisonous, danger_level, risk_note, source_model, fetched_at) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now')) \
+             (species_key, wikipedia_title, wikipedia_url, wikipedia_image_url, edible, \
+              medicinal, psychoactive, poisonous, danger_level, risk_note, source_model, \
+              fetched_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now')) \
          ON CONFLICT(species_key) DO UPDATE SET \
              wikipedia_title = excluded.wikipedia_title, wikipedia_url = excluded.wikipedia_url, \
+             wikipedia_image_url = excluded.wikipedia_image_url, \
              edible = excluded.edible, medicinal = excluded.medicinal, \
              psychoactive = excluded.psychoactive, poisonous = excluded.poisonous, \
              danger_level = excluded.danger_level, risk_note = excluded.risk_note, \
@@ -665,6 +705,7 @@ async fn store_cached_facts(
     .bind(key)
     .bind(wiki_title)
     .bind(&facts.wikipedia_url)
+    .bind(&facts.wikipedia_image_url)
     .bind(bool_to_int(facts.edible))
     .bind(bool_to_int(facts.medicinal))
     .bind(bool_to_int(facts.psychoactive))
@@ -769,6 +810,7 @@ pub async fn gather_facts(state: &AppState, candidate_species: &str) -> SpeciesF
     };
 
     let wikipedia_url = wiki_page.as_ref().map(|p| p.url.clone());
+    let wikipedia_image_url = wiki_page.as_ref().and_then(|p| p.image_url.clone());
     let wiki_extract = wiki_page
         .as_ref()
         .map(|p| p.extract.as_str())
@@ -776,8 +818,10 @@ pub async fn gather_facts(state: &AppState, candidate_species: &str) -> SpeciesF
         .filter(|s| !s.is_empty())
         .unwrap_or("(no Wikipedia article could be retrieved for this candidate)");
 
-    let model = state.llm.identification_chat_model();
-    let llm = fetch_llm_facts(state, candidate_species, wiki_extract, model).await;
+    let model = crate::settings::effective_models(&state.db, &state.config)
+        .await
+        .facts_model;
+    let llm = fetch_llm_facts(state, candidate_species, wiki_extract, &model).await;
 
     let curated_level = curated.as_ref().map(|c| c.danger_level.as_str());
     let (final_level, final_poisonous) = reconcile_danger(curated_level, llm.poisonous);
@@ -785,6 +829,7 @@ pub async fn gather_facts(state: &AppState, candidate_species: &str) -> SpeciesF
 
     let facts = SpeciesFacts {
         wikipedia_url,
+        wikipedia_image_url,
         edible: llm.edible,
         medicinal: llm.medicinal,
         psychoactive: llm.psychoactive,
@@ -793,7 +838,7 @@ pub async fn gather_facts(state: &AppState, candidate_species: &str) -> SpeciesF
     };
 
     if let Err(err) =
-        store_cached_facts(&state.db, &key, &wiki_title, &facts, &final_level, model).await
+        store_cached_facts(&state.db, &key, &wiki_title, &facts, &final_level, &model).await
     {
         tracing::warn!(
             error = ?err,
@@ -972,7 +1017,10 @@ async fn find_extra_confusants(
         serde_json::json!({ "role": "user", "content": user }),
     ];
 
-    let model = state.llm.identification_chat_model();
+    let model = crate::settings::effective_models(&state.db, &state.config)
+        .await
+        .risk_model;
+    let model = model.as_str();
 
     let first = match state.llm.chat_tools(model, messages.clone(), &tools).await {
         Ok(turn) => turn,
@@ -1136,6 +1184,137 @@ pub async fn gather_risks(state: &AppState, candidate_species: &str) -> Vec<Conf
     merge_confusants(state, curated, extras).await
 }
 
+// --- Gatherer 4: visual match (top candidate only) -------------------------
+
+/// Cap on a fetched Wikipedia reference photo's size — these are ordinary
+/// article thumbnails, never large; anything bigger is treated as
+/// unexpected/unsafe to pull into an LLM request rather than fetched.
+const MAX_REFERENCE_IMAGE_BYTES: usize = 8 * 1024 * 1024;
+
+#[derive(Debug, Default, Deserialize)]
+struct VisualMatchLlmOutput {
+    /// `None`/absent means the model itself was unsure — treated the same
+    /// as "not checked" rather than forced to a guess.
+    #[serde(default)]
+    matches: Option<bool>,
+    #[serde(default)]
+    note: String,
+}
+
+const VISUAL_MATCH_SYSTEM_PROMPT: &str = "You are a sanity check on a foraging-safety app's \
+    species identification, not the identifier itself. You will see two images: the forager's own \
+    photo, then a reference photo of the species the app identified it as, from Wikipedia. Decide \
+    whether the two images plausibly show the same kind of organism (allow for different angles, \
+    growth stages, lighting, and photo quality \u{2014} you are catching obvious mismatches, not \
+    demanding a perfect match). Use null for \"matches\" if the comparison is genuinely ambiguous \
+    (e.g. the forager's photo is too blurry/distant to tell) rather than guessing. Respond with \
+    ONLY a JSON object: {\"matches\": bool or null, \"note\": string}. Keep \"note\" under 140 \
+    characters \u{2014} one short, practical phrase, not a paragraph.";
+
+/// Downloads `url`, re-encoding it as a `data:` URL suitable for a vision
+/// request. Enforces [`MAX_REFERENCE_IMAGE_BYTES`] and a short timeout —
+/// this is a best-effort sanity check, not core to the pipeline, so it must
+/// never be allowed to hang or balloon a request.
+async fn fetch_image_as_data_url(http: &reqwest::Client, url: &str) -> AppResult<String> {
+    let resp = http
+        .get(url)
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("fetching reference image failed: {e}")))?;
+
+    if !resp.status().is_success() {
+        return Err(AppError::Internal(anyhow::anyhow!(
+            "reference image fetch returned {}",
+            resp.status()
+        )));
+    }
+    let content_type = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("image/jpeg")
+        .to_string();
+
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("reading reference image failed: {e}")))?;
+    if bytes.len() > MAX_REFERENCE_IMAGE_BYTES {
+        return Err(AppError::Internal(anyhow::anyhow!(
+            "reference image is {} bytes, over the {} byte cap",
+            bytes.len(),
+            MAX_REFERENCE_IMAGE_BYTES
+        )));
+    }
+
+    Ok(format!(
+        "data:{content_type};base64,{}",
+        BASE64.encode(bytes)
+    ))
+}
+
+/// Gatherer 4: fetches a real Wikipedia photo of `candidate_species` and
+/// asks a vision model whether it matches `user_photo` (a base64 data URL,
+/// reused from gatherer 1's already-loaded images). Infallible by design —
+/// any missing reference photo, fetch failure, or LLM error degrades to
+/// `(None, "")` ("not checked"), never blocking or failing the pipeline.
+async fn verify_visual_match(
+    state: &AppState,
+    user_photo: &str,
+    candidate_species: &str,
+    wikipedia_image_url: Option<&str>,
+) -> (Option<bool>, String) {
+    let Some(image_url) = wikipedia_image_url else {
+        return (None, String::new());
+    };
+
+    let reference_photo = match fetch_image_as_data_url(&state.http_client, image_url).await {
+        Ok(data_url) => data_url,
+        Err(err) => {
+            tracing::warn!(
+                error = ?err,
+                candidate_species,
+                "identification: failed to fetch wikipedia reference image; skipping visual match"
+            );
+            return (None, String::new());
+        }
+    };
+
+    let model = crate::settings::effective_models(&state.db, &state.config)
+        .await
+        .visual_match_model;
+    let user_text = format!(
+        "The first image is the forager's own photo. The second image is a Wikipedia reference \
+         photo of {candidate_species}."
+    );
+    let images = vec![user_photo.to_string(), reference_photo];
+
+    match state
+        .llm
+        .chat_json_vision::<VisualMatchLlmOutput>(
+            &model,
+            VISUAL_MATCH_SYSTEM_PROMPT,
+            &user_text,
+            &images,
+        )
+        .await
+    {
+        Ok(out) => (
+            out.matches,
+            truncate_chars(out.note.trim(), RISK_NOTE_MAX_CHARS),
+        ),
+        Err(err) => {
+            tracing::warn!(
+                error = ?err,
+                candidate_species,
+                "identification: visual-match LLM call failed; skipping"
+            );
+            (None, String::new())
+        }
+    }
+}
+
 // --- Orchestrator ------------------------------------------------------------
 
 async fn enrich_candidate(state: &AppState, candidate: Candidate) -> EnrichedCandidate {
@@ -1147,6 +1326,8 @@ async fn enrich_candidate(state: &AppState, candidate: Candidate) -> EnrichedCan
         candidate,
         facts,
         confusants,
+        visual_match: None,
+        visual_match_note: String::new(),
     }
 }
 
@@ -1327,8 +1508,24 @@ pub async fn run_identification(state: &AppState, sighting_id: &str) -> AppResul
     )
     .await?;
 
-    let enriched: Vec<EnrichedCandidate> =
+    let mut enriched: Vec<EnrichedCandidate> =
         futures::future::join_all(ordered.into_iter().map(|c| enrich_candidate(state, c))).await;
+
+    // Gatherer 4, top candidate only: fetch a real Wikipedia reference photo
+    // and ask a vision model whether it matches the forager's own photo —
+    // an error-detection sanity check, not a safety signal in itself.
+    if let (Some(top), Some(user_photo)) = (enriched.first_mut(), candidate_result.images.first()) {
+        let wikipedia_image_url = top.facts.wikipedia_image_url.clone();
+        let (visual_match, visual_match_note) = verify_visual_match(
+            state,
+            user_photo,
+            &top.candidate.species,
+            wikipedia_image_url.as_deref(),
+        )
+        .await;
+        top.visual_match = visual_match;
+        top.visual_match_note = visual_match_note;
+    }
 
     let final_dto = compile_identification(
         IdentificationStatus::Complete,
@@ -1629,7 +1826,7 @@ mod tests {
             oidc: None,
             cookie_key: axum_extra::extract::cookie::Key::generate(),
             llm,
-            http_client: reqwest::Client::new(),
+            http_client: crate::state::build_http_client(),
             identification_semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(1)),
         };
         (dir, state)
@@ -1675,6 +1872,7 @@ mod tests {
         let (_dir, state) = test_state().await;
         let facts = SpeciesFacts {
             wikipedia_url: Some("https://en.wikipedia.org/wiki/Example".to_string()),
+            wikipedia_image_url: Some("https://en.wikipedia.org/example.jpg".to_string()),
             edible: Some(true),
             medicinal: Some(false),
             psychoactive: None,
@@ -1704,6 +1902,10 @@ mod tests {
         assert_eq!(
             cached.wikipedia_url,
             Some("https://en.wikipedia.org/wiki/Example".to_string())
+        );
+        assert_eq!(
+            cached.wikipedia_image_url,
+            Some("https://en.wikipedia.org/example.jpg".to_string())
         );
     }
 

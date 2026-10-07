@@ -13,6 +13,7 @@ use tower_http::timeout::TimeoutLayer;
 use crate::auth;
 use crate::identification;
 use crate::photos;
+use crate::settings;
 use crate::sightings;
 use crate::state::AppState;
 use crate::weather;
@@ -41,6 +42,7 @@ pub fn build(state: AppState) -> Router {
         .merge(photos::router())
         .merge(identification::router())
         .merge(weather::router())
+        .merge(settings::router())
         .layer(TimeoutLayer::with_status_code(
             StatusCode::REQUEST_TIMEOUT,
             REQUEST_TIMEOUT,

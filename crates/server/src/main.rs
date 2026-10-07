@@ -7,6 +7,7 @@ mod llm;
 mod photos;
 mod routes;
 mod security;
+mod settings;
 mod sightings;
 mod species;
 mod state;
@@ -126,7 +127,7 @@ async fn main() -> anyhow::Result<()> {
         oidc,
         cookie_key,
         llm,
-        http_client: reqwest::Client::new(),
+        http_client: state::build_http_client(),
         identification_semaphore: Arc::new(tokio::sync::Semaphore::new(1)),
     };
 

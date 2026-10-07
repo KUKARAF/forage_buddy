@@ -25,8 +25,12 @@ pub struct AppState {
     /// LLM chat/vision/embeddings client.
     pub llm: LlmClient,
     /// Plain `reqwest::Client` for small external calls that aren't the LLM
-    /// provider (currently just `weather::fetch_last_14_days`) — no auth/
-    /// provider-switch plumbing needed, so it doesn't live on `llm`.
+    /// provider (`weather::fetch_last_14_days`,
+    /// `identification::fetch_image_as_data_url`) — no auth/provider-switch
+    /// plumbing needed, so it doesn't live on `llm`. Built by
+    /// [`build_http_client`] — MUST send a `User-Agent`: Wikimedia's CDN
+    /// now 403s image requests with none (a real bug this comment exists
+    /// to prevent regressing — see `fetch_image_as_data_url`'s call site).
     pub http_client: reqwest::Client,
     /// Serializes `identification::run_identification` runs process-wide.
     /// Uploading several photos for the same sighting in quick succession
@@ -45,4 +49,17 @@ impl FromRef<AppState> for Key {
     fn from_ref(state: &AppState) -> Self {
         state.cookie_key.clone()
     }
+}
+
+/// Builds [`AppState::http_client`]: no redirects (SSRF hygiene, same
+/// rationale as the OIDC/LLM/Wikipedia clients) and a real `User-Agent` —
+/// required since some CDNs (Wikimedia's included, as of a recent policy
+/// change) now reject requests that send none at all, rather than just
+/// rate-limiting a generic one.
+pub fn build_http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .user_agent("forage-buddy/0.1 (safety research aid)")
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
 }

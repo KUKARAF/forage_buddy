@@ -229,6 +229,16 @@ export interface IdentificationCandidate {
 	/** Short phrase, may be empty — never a paragraph. */
 	risk_note: string;
 	confusants: Confusant[];
+	/**
+	 * Vision-LLM sanity check: does this candidate's species match a Wikipedia
+	 * reference photo of it? Only ever populated for the top-confidence
+	 * candidate (index 0) — `null` for every other candidate. `null` means
+	 * "not checked" (no reference photo available, or the check failed), not
+	 * "no match" — render it as a neutral/absent state, never a red flag.
+	 */
+	visual_match: boolean | null;
+	/** Short phrase, may be empty string. */
+	visual_match_note: string;
 }
 
 /** The one automatic identification result for a sighting (replaces the old
@@ -246,6 +256,19 @@ export interface SightingDetail {
 	sighting: Sighting;
 	photos: Photo[];
 	identification: IdentificationResult | null;
+}
+
+/**
+ * GET /api/settings response shape (also what PUT echoes back, reflecting
+ * the now-current values). `available_models` is server-provided and not
+ * sent back on PUT.
+ */
+export interface Settings {
+	candidate_model: string;
+	facts_model: string;
+	risk_model: string;
+	visual_match_model: string;
+	available_models: string[];
 }
 
 // --- Typed API helpers --------------------------------------------------------
@@ -429,4 +452,17 @@ export function runIdentification(
 		{},
 		{ timeoutMs: LONG_RUNNING_TIMEOUT_MS, ...options }
 	);
+}
+
+/** GET /api/settings — current model-slot assignments plus the catalogue of models they can be set to. */
+export function getSettings(options?: RequestOptions): Promise<Settings> {
+	return request<Settings>('GET', '/api/settings', undefined, options);
+}
+
+/** PUT /api/settings — update all 4 model slots at once. Returns the same shape as `getSettings`, reflecting the now-current values. */
+export function updateSettings(
+	settings: Omit<Settings, 'available_models'>,
+	options?: RequestOptions
+): Promise<Settings> {
+	return request<Settings>('PUT', '/api/settings', settings, options);
 }

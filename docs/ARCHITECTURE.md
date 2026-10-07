@@ -51,7 +51,7 @@ over a `BLOB` embeddings table is plenty at personal-project scale.
 
 ```
 crates/core     forage-buddy-core: shared domain enums + device-token gen (no axum/sqlx/tauri)
-crates/server   the axum binary: auth, db, llm, photos, sightings, identification, species, wikipedia, vector, weather
+crates/server   the axum binary: auth, db, llm, photos, sightings, identification, species, wikipedia, vector, weather, settings
 crates/mobile   Tauri 2 Android app wrapping web/build
 web/            SvelteKit SPA (capture → identification screens)
 crates/server/migrations/
@@ -66,6 +66,9 @@ crates/server/migrations/
   0009_identification.sql     identification_results table (the current pipeline)
   0010_species_facts_cache.sql species_facts_cache table (cross-sighting facts cache)
   0011_identification_backfill.sql  one-time data migration: old triage/deepdive history -> identification_results
+  0012_wikipedia_image_url.sql  wikipedia_pages gains image_url (reference photo for gatherer 4)
+  0013_model_settings.sql  model_settings table (per-gatherer runtime model overrides)
+  0014_species_facts_cache_image_url.sql  species_facts_cache gains wikipedia_image_url
 ```
 
 **On the old `triage`/`deepdive` tables:** this app has real production data,
@@ -95,9 +98,20 @@ Mirrors `ai_buddy`'s `AIBUDDY_*` naming exactly, module for module:
 | `FORAGEBUDDY_LLM_PROVIDER` | `litellm` | `litellm` or `openrouter` |
 | `FORAGEBUDDY_LITELLM_API_KEY` / `FORAGEBUDDY_LITELLM_BASE_URL` | unset / `https://litellm.osmosis.page/v1` | |
 | `FORAGEBUDDY_OPENROUTER_API_KEY` | unset | Used when provider=openrouter, and always for embeddings fallback per ai_buddy's logic |
-| `FORAGEBUDDY_CHAT_MODEL` | `openrouter/~anthropic/claude-haiku-latest` | Must be vision-capable — used by the identification pipeline's candidate-gathering pass |
-| `FORAGEBUDDY_IDENTIFICATION_MODEL` | same as `FORAGEBUDDY_CHAT_MODEL` | Model for the identification pipeline's facts + risks gatherers (species facts lookup, confusant-enrichment tool calls) — off the candidate gatherer's "need an answer in seconds" path, so a stronger/slower model is a reasonable choice here |
-| `FORAGEBUDDY_ALLOWED_CHAT_MODELS` | same + `gemma4-26b` | comma-separated |
+| `FORAGEBUDDY_CHAT_MODEL` | `openrouter/~google/gemini-flash-latest` | Vision-capable — default for gatherer 1 (candidates) |
+| `FORAGEBUDDY_FACTS_MODEL` | `openrouter/~anthropic/claude-haiku-latest` | Default for gatherer 2 (facts) |
+| `FORAGEBUDDY_RISK_MODEL` | `openrouter/~google/gemini-flash-latest` | Tool-calling-capable — default for gatherer 3 (risks) |
+| `FORAGEBUDDY_VISUAL_MATCH_MODEL` | `openrouter/~google/gemini-flash-latest` | Vision-capable — default for gatherer 4 (visual match) |
+| `FORAGEBUDDY_ALLOWED_CHAT_MODELS` | 5 curated models | comma-separated; also the Settings page's dropdown options |
+
+**These four `*_MODEL` vars are only defaults.** The `settings` module
+(migration `0013_model_settings.sql`, table `model_settings` — a singleton
+row) holds per-gatherer overrides, editable at runtime via `GET`/
+`PUT /api/settings` or the web Settings page, with no restart required.
+`identification::effective_models` equivalent —
+`settings::effective_models(db, config)` — is what every gatherer actually
+calls: DB override if set and non-empty, else the matching `Config`
+default.
 | `FORAGEBUDDY_EMBEDDING_MODEL` / `FORAGEBUDDY_EMBEDDING_DIM` | `bge-m3` / `1024` | |
 | `FORAGEBUDDY_CORS_ORIGINS` | dev localhost + `http://tauri.localhost` | |
 | `FORAGEBUDDY_MAX_PHOTO_BYTES` | `15728640` (15 MiB) | per-photo upload cap before resize |
@@ -367,6 +381,7 @@ app's scale.
   `GET /api/photos/{id}/file` — streams the original image (auth + ownership checked)
 - **Identification:** `GET /api/sightings/{id}/identification` (full history, newest first) · `POST /api/sightings/{id}/identification` (manual re-run/retry, e.g. after notes edited or a prior attempt failed)
 - **Weather:** `GET /api/weather?lat=&lon=` → last 14 days of daily historical weather (`temp_max_c`/`temp_min_c`/`temp_mean_c`/`precipitation_mm`/`rain_mm`/`wind_speed_max_kmh`/`wind_speed_mean_kmh`/`humidity_mean_pct` per day), via `weather::fetch_last_14_days` (Open-Meteo Archive API, no key required). Groundwork for a future season/weather-aware foraging-suggestion feature; not called from the frontend yet.
+- **Settings:** `GET /api/settings` → `{candidate_model, facts_model, risk_model, visual_match_model, available_models}` (effective per-gatherer model + the curated dropdown list) · `PUT /api/settings` `{candidate_model, facts_model, risk_model, visual_match_model}` (all 4 required; each validated against `available_models`, else `400`) → same shape, now reflecting the update. Backed by `settings::effective_models`/the `model_settings` table — see the Environment variables section.
 
 Every error response is `{"message": "..."}` (see `ai_buddy`'s `AppError`,
 ported as-is minus `PaymentRequired`).
@@ -374,10 +389,11 @@ ported as-is minus `PaymentRequired`).
 ## The identification pipeline, in detail
 
 Runs automatically on every photo upload (`photos::on_photo_uploaded` calls
-`identification::run_identification` directly) and can be manually re-run
-via `POST /api/sightings/{id}/identification`. `run_identification`
-orchestrates three internal gatherer stages — NOT separate processes, just
-named, narrowly-scoped calls:
+`identification::run_identification` directly, serialized by
+`AppState.identification_semaphore` — see that field's doc comment) and can
+be manually re-run via `POST /api/sightings/{id}/identification`.
+`run_identification` orchestrates four internal gatherer stages — NOT
+separate processes, just named, narrowly-scoped calls:
 
 1. **Candidates** (`gather_candidates`, fast/cheap vision call) — identifies
    the most likely species (or genus, when species-level confidence isn't
@@ -387,41 +403,53 @@ named, narrowly-scoped calls:
    MUST be willing to return an EMPTY candidates array with concrete
    `missing_info` (e.g. "photo of the gill attachment to the stem", "photo
    of the underside/pores", "a spore print", "the full plant including
-   root/base") rather than guess. One `chat_json_vision` call on
-   `FORAGEBUDDY_CHAT_MODEL`.
+   root/base") rather than guess. One `chat_json_vision` call on the
+   `candidate_model` setting.
 2. **Facts** (`gather_facts`, per top candidate, runs concurrently with
    step 3) — read-through `species_facts_cache` keyed on the normalized
    species/genus name; on a cache miss, resolves the best Wikipedia article
    (try `species_reference.wikipedia_title` first, else the species name)
-   via `wikipedia::fetch_or_cache`, then one `chat_json` call on
-   `FORAGEBUDDY_IDENTIFICATION_MODEL` extracting
-   `{edible, medicinal, psychoactive, poisonous, risk_note}` (`risk_note`
-   truncated to 140 chars in code — never trusted to self-limit), then
-   writes through the cache. **Curated reference data is a floor, never a
-   ceiling**: if `species::lookup` finds a curated `species_reference` row,
-   its `danger_level` can only be *raised*, never lowered, by the LLM's own
-   `poisonous` guess (see `identification::reconcile_danger`).
+   via `wikipedia::fetch_or_cache` (which now also captures a representative
+   photo URL — `thumbnail.source` falling back to `originalimage.source` —
+   used by step 4), then one `chat_json` call on the `facts_model` setting
+   extracting `{edible, medicinal, psychoactive, poisonous, risk_note}`
+   (`risk_note` truncated to 140 chars in code — never trusted to
+   self-limit), then writes through the cache. **Curated reference data is
+   a floor, never a ceiling**: if `species::lookup` finds a curated
+   `species_reference` row, its `danger_level` can only be *raised*, never
+   lowered, by the LLM's own `poisonous` guess (see
+   `identification::reconcile_danger`).
 3. **Risks** (`gather_risks`, per top candidate, runs concurrently with
    step 2) — queries `confusant_pairs` for the candidate (and its
    genus-mates) first (curated, trustworthy, offline); then runs one
-   `chat_tools` loop on `FORAGEBUDDY_IDENTIFICATION_MODEL` where the model
-   can call a `search_wikipedia` tool (semantic search over embeddings this
-   step grounds via `wikipedia::fetch_or_cache` + `vector::upsert`) to
-   extend the confusant list. Always merges in the curated pairs even if the
-   model's tool loop fails or times out — curated data must never be lost
-   to an LLM hiccup. Output is condensed to one short phrase per confusant
-   (species + danger level + a ≤100-char distinguishing note) — no
-   checklist arrays, no paragraph notes.
+   `chat_tools` loop on the `risk_model` setting where the model can call a
+   `search_wikipedia` tool (semantic search over embeddings this step
+   grounds via `wikipedia::fetch_or_cache` + `vector::upsert`) to extend the
+   confusant list. Always merges in the curated pairs even if the model's
+   tool loop fails or times out — curated data must never be lost to an LLM
+   hiccup. Output is condensed to one short phrase per confusant (species +
+   danger level + a ≤100-char distinguishing note) — no checklist arrays,
+   no paragraph notes.
+4. **Visual match** (`verify_visual_match`, TOP CANDIDATE ONLY, runs after
+   steps 2+3 finish) — an error-detection sanity check, not a safety
+   signal: fetches the real Wikipedia photo URL step 2 captured for the top
+   candidate, re-encodes it as a `data:` URL (capped at 8 MiB, 10s
+   timeout), and asks one `chat_json_vision` call on the `visual_match_model`
+   setting whether it plausibly shows the same organism as the forager's
+   own (already-loaded) photo. Infallible: no reference photo, a fetch
+   failure, or an LLM error all degrade to `(None, "")` — "not checked",
+   never blocking the pipeline or treated as "no match".
 
 `run_identification`'s lifecycle: INSERT a `pending` row immediately → run
 the candidates gatherer → UPDATE to `partial` (or `insufficient` if no
 candidates were found, in which case the pipeline stops here) → run the
 facts+risks gatherers concurrently per top candidate (capped to the top 3 by
-confidence) → `compile_identification` (pure Rust, NOT an LLM call: merges
-everything, enforces every text-field length cap, sorts candidates by
-confidence descending, caps to 3) → UPDATE to `complete`. On any
-unrecoverable error at any step, UPDATE to `failed` rather than leaving the
-row stuck at `pending`/`partial` forever.
+confidence) → run the visual-match check for the single top candidate →
+`compile_identification` (pure Rust, NOT an LLM call: merges everything,
+enforces every text-field length cap, sorts candidates by confidence
+descending, caps to 3) → UPDATE to `complete`. On any unrecoverable error at
+any step, UPDATE to `failed` rather than leaving the row stuck at
+`pending`/`partial` forever.
 
 Exact response/stored JSON shape (`IdentificationResultDto`):
 
@@ -437,14 +465,21 @@ Exact response/stored JSON shape (`IdentificationResultDto`):
       "edible": true, "medicinal": false, "psychoactive": false, "poisonous": false,
       "wikipedia_url": "https://en.wikipedia.org/wiki/...",
       "risk_note": "short phrase, ≤140 chars",
-      "confusants": [ {"species": "...", "danger_level": "unknown|mild|toxic|deadly_toxic", "note": "≤100 chars", "wikipedia_url": "..."} ]
+      "confusants": [ {"species": "...", "danger_level": "unknown|mild|toxic|deadly_toxic", "note": "≤100 chars", "wikipedia_url": "..."} ],
+      "visual_match": true,
+      "visual_match_note": "short phrase, may be empty, ≤140 chars"
     }
   ],
   "missing_info": ["..."]
 }
 ```
 
-Booleans may be `null` when unknown (never a forced guess).
+Booleans may be `null` when unknown (never a forced guess). `visual_match`/
+`visual_match_note` are only ever populated on `candidates[0]` (the
+top-confidence candidate) — every other candidate always has
+`visual_match: null`; `#[serde(default)]` on both fields so rows persisted
+before gatherer 4 existed (including the `0011` triage/deepdive backfill)
+still deserialize.
 
 ## Frontend screens (SvelteKit, `web/src/routes/`)
 
@@ -457,15 +492,23 @@ Booleans may be `null` when unknown (never a forced guess).
   `@tauri-apps/plugin-geolocation` (native) falling back to
   `navigator.geolocation` (web), date/time defaults to now but is editable.
   Creates the sighting, uploads the first photo, redirects to its detail page.
-- `/sightings/[id]` — photo gallery + "add another photo" (re-runs
-  identification automatically), one identification card: status, each
-  candidate with confidence bar + edible/medicinal/psychoactive/poisonous
-  flags + Wikipedia link + risk note, or the "I'm not sure yet — send a
-  photo of…" prompt rendered prominently when `insufficient`; a visually
-  distinct **"Could be confused with"** section per confusant (danger-level
-  colored badge: grey=unknown, yellow=mild, orange=toxic, red=deadly toxic)
-  with its short distinguishing note. A manual "Re-run identification"
-  action stays available (e.g. after adding more photos or notes).
+- `/sightings/[id]` — photos at the very top of the page (gallery + an
+  always-visible "add more photos" control; re-runs identification
+  automatically), then one identification card per top candidate: status,
+  confidence + edible/medicinal/psychoactive/poisonous flags + Wikipedia
+  link + risk note, a badge for `visual_match` (only ever shown on the top
+  candidate: ✅ when `true`, an amber "worth a second look" note when
+  `false`, nothing when `null`/"not checked"), or the "I'm not sure yet —
+  send a photo of…" prompt rendered prominently when `insufficient`; a
+  visually distinct **"Could be confused with"** section per confusant
+  (danger-level colored badge: grey=unknown, yellow=mild, orange=toxic,
+  red=deadly toxic) with its short distinguishing note. A manual "Re-run
+  identification" action stays available (e.g. after adding more photos or
+  notes).
+- `/settings` — 4 dropdowns (one per gatherer: candidate/facts/risk/visual
+  match), populated from `available_models`, pre-selected to the current
+  effective model; Save PUTs all 4 at once. Linked from a "⚙ Settings" link
+  in the header.
 
 ## Safety disclaimer + poisonous warning (frontend-only; not enforced by the backend)
 
