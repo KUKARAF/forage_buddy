@@ -60,3 +60,10 @@ jobs:
             org.opencontainers.image.source=https://github.com/KUKARAF/forage_buddy
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # Tell bigboy a new image is on GHCR: datacenter-listen there runs the
+      # normal update for every service using this repo. Only the repo name is
+      # sent, so no secret is needed (a forged message just triggers a check).
+      - name: Announce deploy
+        if: github.ref == 'refs/heads/main'
+        run: curl -fsS --retry 3 -d "${{ github.repository }}" https://ntfy.sh/osmosis-deploy-3c19f23c8502
