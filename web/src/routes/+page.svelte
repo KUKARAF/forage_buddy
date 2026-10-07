@@ -4,7 +4,6 @@
 	import { resolve } from '$app/paths';
 	import { listSightings, ApiError, type SightingListItem } from '$lib/api/client';
 	import { relativeTime, placeOrCoords } from '$lib/format';
-	import SafetyBanner from '$lib/components/SafetyBanner.svelte';
 	import StatusBadge from '$lib/components/StatusBadge.svelte';
 	import PhotoImg from '$lib/components/PhotoImg.svelte';
 
@@ -30,8 +29,6 @@
 <svelte:head>
 	<title>Forage Buddy</title>
 </svelte:head>
-
-<SafetyBanner />
 
 <div class="header-row">
 	<h1>Your sightings</h1>

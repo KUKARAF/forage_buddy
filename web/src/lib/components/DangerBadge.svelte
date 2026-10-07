@@ -1,17 +1,15 @@
 <script lang="ts">
-	// Color-coded badge for a DangerLevel: grey=unknown, green=safe,
-	// amber=caution, orange=toxic, red=deadly_toxic. `deadly_toxic` is
-	// rendered unmistakably alarming (bold, bordered, exclamation) rather than
-	// a subtle tint — this is the one case where "fits the design" must lose
-	// to "cannot be missed".
+	// Color-coded badge for a DangerLevel: grey=unknown, amber=mild,
+	// orange=toxic, red=deadly_toxic. `deadly_toxic` is rendered unmistakably
+	// alarming (bold, bordered, exclamation) rather than a subtle tint — this
+	// is the one case where "fits the design" must lose to "cannot be missed".
 	import type { DangerLevel } from '$lib/api/client';
 
 	let { level, label }: { level: DangerLevel; label?: string } = $props();
 
 	const text: Record<DangerLevel, string> = {
 		unknown: 'Unknown risk',
-		safe: 'Safe',
-		caution: 'Caution',
+		mild: 'Mild risk',
 		toxic: 'Toxic',
 		deadly_toxic: 'DEADLY TOXIC'
 	};
@@ -39,11 +37,7 @@
 		background: var(--grey-bg);
 		color: var(--grey);
 	}
-	.level-safe {
-		background: var(--green-bg);
-		color: var(--green);
-	}
-	.level-caution {
+	.level-mild {
 		background: var(--amber-bg);
 		color: var(--amber);
 	}

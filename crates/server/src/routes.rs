@@ -11,18 +11,19 @@ use tower_http::services::{ServeDir, ServeFile};
 use tower_http::timeout::TimeoutLayer;
 
 use crate::auth;
-use crate::deepdive;
+use crate::identification;
 use crate::photos;
 use crate::sightings;
 use crate::state::AppState;
-use crate::triage;
+use crate::weather;
 
 /// Headroom added on top of `Config::max_photo_bytes` for multipart framing
 /// overhead (field boundaries, headers) when a photo upload is the request.
 const BODY_LIMIT_HEADROOM_BYTES: usize = 1024 * 1024;
 
-/// Per-request wall-clock timeout. Triage/deep-dive calls out to an LLM
-/// provider and can legitimately take tens of seconds, so this is generous.
+/// Per-request wall-clock timeout. The identification pipeline calls out to
+/// an LLM provider (and Wikipedia) multiple times and can legitimately take
+/// tens of seconds, so this is generous.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Ceiling on concurrently-processed REST requests.
@@ -38,8 +39,8 @@ pub fn build(state: AppState) -> Router {
         .merge(auth::oidc::router())
         .merge(sightings::router())
         .merge(photos::router())
-        .merge(triage::router())
-        .merge(deepdive::router())
+        .merge(identification::router())
+        .merge(weather::router())
         .layer(TimeoutLayer::with_status_code(
             StatusCode::REQUEST_TIMEOUT,
             REQUEST_TIMEOUT,

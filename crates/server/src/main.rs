@@ -1,8 +1,8 @@
 mod auth;
 mod config;
 mod db;
-mod deepdive;
 mod error;
+mod identification;
 mod llm;
 mod photos;
 mod routes;
@@ -10,8 +10,8 @@ mod security;
 mod sightings;
 mod species;
 mod state;
-mod triage;
 mod vector;
+mod weather;
 mod wikipedia;
 
 use std::sync::Arc;
@@ -126,6 +126,8 @@ async fn main() -> anyhow::Result<()> {
         oidc,
         cookie_key,
         llm,
+        http_client: reqwest::Client::new(),
+        identification_semaphore: Arc::new(tokio::sync::Semaphore::new(1)),
     };
 
     // Outermost layer: defense-in-depth security headers (CSP, nosniff, etc.)

@@ -54,7 +54,7 @@ function authHeaders(): Record<string, string> {
 // well-supported in current browsers and Android WebView.
 const DEFAULT_TIMEOUT_MS = 20_000;
 const UPLOAD_TIMEOUT_MS = 60_000;
-// Triage/deep-dive calls out to an LLM and can legitimately take tens of
+// Identification calls out to an LLM and can legitimately take tens of
 // seconds; the backend's own request timeout (routes.rs) is 120s, so the
 // client timeout is set a bit above that rather than racing it.
 const LONG_RUNNING_TIMEOUT_MS = 130_000;
@@ -134,8 +134,17 @@ export async function request<TResponse>(
 // --- Domain types (mirror docs/ARCHITECTURE.md + crates/core/src/domain.rs) --
 
 export type SightingStatus = 'open' | 'archived';
-export type TriageStatus = 'insufficient' | 'genus_candidate' | 'species_candidate';
-export type DangerLevel = 'unknown' | 'safe' | 'caution' | 'toxic' | 'deadly_toxic';
+/**
+ * Status of the single automatic identification result for a sighting
+ * (replaces the old separate triage/deep-dive flow). `pending`/`partial` are
+ * both "still working" states the UI treats identically (show a spinner,
+ * keep polling); `insufficient` means the backend needs more photos/info;
+ * `failed` means the run errored and a manual retry (`runIdentification`) is
+ * offered; `complete` means `candidates` is ready to render.
+ */
+export type IdentificationStatus = 'pending' | 'partial' | 'complete' | 'insufficient' | 'failed';
+/** Confusant danger scale, per the new identification contract. */
+export type DangerLevel = 'unknown' | 'mild' | 'toxic' | 'deadly_toxic';
 
 /** The authenticated user (GET /auth/me). In FORAGEBUDDY_DEV_MODE this is
  * always the implicit "admin" user, so the same bootstrap code works
@@ -160,18 +169,11 @@ export interface Sighting {
 }
 
 /**
- * GET /api/sightings row shape. ARCHITECTURE.md documents the list endpoint
- * as returning "id, created_at, observed_at, place_label, lat, lon, status,
- * photo_count, latest triage status/genus, thumbnail photo id" — notably
- * narrower than the detail endpoint. The optional fields below
- * (`latest_triage_species`, `latest_deepdive_*`) are NOT in that documented
- * list; they're included here so the list screen's "show the deepdive danger
- * color when one exists" and "Species: {name}" badge requirements (see
- * ARCHITECTURE.md "Frontend screens") can be satisfied if/when the sightings
- * module adds them, without a per-row extra request. The UI falls back
- * gracefully (to the genus, and to the triage-only badge) when they're
- * absent. See this agent's final report for the explicit ask to the
- * "photos"/sightings-owning backend agent.
+ * GET /api/sightings row shape: the sighting plus a cheap summary of its
+ * latest identification attempt (status, top-confidence candidate's raw
+ * species name, and the single highest-severity danger signal across that
+ * attempt's candidates/confusants), confirmed against
+ * `crates/server/src/sightings/mod.rs`'s `SightingSummary`.
  */
 export interface SightingListItem {
 	id: string;
@@ -183,14 +185,10 @@ export interface SightingListItem {
 	status: SightingStatus;
 	photo_count: number;
 	thumbnail_photo_id: string | null;
-	latest_triage_status: TriageStatus | null;
-	latest_triage_genus: string | null;
-	/** Not in the documented list contract; optional forward-compat field. */
-	latest_triage_species?: string | null;
-	/** Not in the documented list contract; optional forward-compat field. */
-	latest_deepdive_danger_level?: DangerLevel | null;
-	/** Not in the documented list contract; optional forward-compat field. */
-	latest_deepdive_best_match_species?: string | null;
+	latest_identification_status?: IdentificationStatus | null;
+	/** Raw `species` name of the top-confidence candidate (not common-name-resolved). */
+	latest_identification_species?: string | null;
+	latest_identification_danger_level?: DangerLevel | null;
 }
 
 export interface Photo {
@@ -204,51 +202,50 @@ export interface Photo {
 	created_at: string;
 }
 
-export interface CandidateSpecies {
-	species: string;
-	common_name: string | null;
-	confidence: number;
-}
-
-export interface TriageResult {
-	id: string;
-	created_at: string;
-	model: string;
-	status: TriageStatus;
-	genus: string | null;
-	candidate_species: CandidateSpecies[];
-	missing_info: string[];
-	reasoning: string;
-	photos_considered: number;
-}
-
+/** A look-alike species listed on an identification candidate — rendered as
+ * a single short inline chip, never a bulleted checklist of distinguishing
+ * features (that pattern is exactly the "wall of text" this replaced). */
 export interface Confusant {
 	species: string;
-	common_name: string | null;
 	danger_level: DangerLevel;
-	distinguishing_features: string[];
-	notes: string;
+	/** Short phrase, may be empty. */
+	note: string;
+	wikipedia_url?: string | null;
 }
 
-export interface DeepDiveResult {
-	id: string;
-	created_at: string;
-	model: string;
-	best_match_species: string;
+/** One possible species for a sighting's identification result. `edible`/
+ * `medicinal`/`psychoactive`/`poisonous` are tri-state: `null` means
+ * "unknown", not "false" — render a neutral state for it, never treat it as
+ * a negative answer. */
+export interface IdentificationCandidate {
+	species: string;
+	common_name: string | null;
 	confidence: number;
-	wikipedia_title: string | null;
-	wikipedia_url: string | null;
-	wikipedia_extract: string | null;
+	edible: boolean | null;
+	medicinal: boolean | null;
+	psychoactive: boolean | null;
+	poisonous: boolean | null;
+	wikipedia_url?: string | null;
+	/** Short phrase, may be empty — never a paragraph. */
+	risk_note: string;
 	confusants: Confusant[];
-	safety_notes: string;
+}
+
+/** The one automatic identification result for a sighting (replaces the old
+ * separate triage + manually-triggered deep-dive results). */
+export interface IdentificationResult {
+	status: IdentificationStatus;
+	created_at: string;
+	candidates: IdentificationCandidate[];
+	/** Only present/non-empty when `status` is `'insufficient'`. */
+	missing_info?: string[];
 }
 
 /** GET /api/sightings/{id} — the one-request aggregate view for the detail screen. */
 export interface SightingDetail {
 	sighting: Sighting;
 	photos: Photo[];
-	triage: TriageResult | null;
-	deepdive: DeepDiveResult | null;
+	identification: IdentificationResult | null;
 }
 
 // --- Typed API helpers --------------------------------------------------------
@@ -294,7 +291,7 @@ export function listSightings(options?: RequestOptions): Promise<SightingListIte
 
 /**
  * GET /api/sightings/{id} — the aggregate view (sighting + photos + latest
- * triage + latest deepdive) the detail screen renders from in one request.
+ * identification result) the detail screen renders from in one request.
  */
 export function getSightingDetail(
 	sightingId: string,
@@ -331,9 +328,10 @@ export function patchSighting(
  * POST /api/sightings/{id}/photos — multipart upload, field name `photo`.
  * `takenAt` is an optional RFC3339 string (defaults server-side to upload
  * time); `lat`/`lon` optionally override the sighting's own location if the
- * user moved between shots. Triggers triage server-side after commit
- * (fire-and-forget on the backend) — callers should refetch the sighting
- * detail after a short delay (or let the user retrigger) to see the result.
+ * user moved between shots. Triggers identification server-side after
+ * commit (fire-and-forget on the backend) — callers should refetch the
+ * sighting detail after a short delay (or let the user retrigger) to see
+ * the result.
  */
 export async function uploadPhoto(
 	sightingId: string,
@@ -415,63 +413,20 @@ export async function fetchPhotoBlob(photoId: string, options: RequestOptions = 
 	return response.blob();
 }
 
-/** GET /api/sightings/{id}/triage — full triage history, newest first. */
-export function getTriageHistory(
+/**
+ * POST /api/sightings/{id}/identification — manual re-run/retry. Covers both
+ * "re-run after adding a note" and "the automatic run failed, try again".
+ * Can take tens of seconds (LLM call); callers should show a clear loading
+ * state while this is in flight.
+ */
+export function runIdentification(
 	sightingId: string,
 	options?: RequestOptions
-): Promise<TriageResult[]> {
-	return request<TriageResult[]>(
-		'GET',
-		`/api/sightings/${encodeURIComponent(sightingId)}/triage`,
-		undefined,
-		options
-	);
-}
-
-/** POST /api/sightings/{id}/triage — manual re-run (e.g. after notes edited). */
-export function runTriage(sightingId: string, options?: RequestOptions): Promise<TriageResult> {
-	return request<TriageResult>(
+): Promise<IdentificationResult> {
+	return request<IdentificationResult>(
 		'POST',
-		`/api/sightings/${encodeURIComponent(sightingId)}/triage`,
+		`/api/sightings/${encodeURIComponent(sightingId)}/identification`,
 		{},
 		{ timeoutMs: LONG_RUNNING_TIMEOUT_MS, ...options }
 	);
-}
-
-/**
- * POST /api/sightings/{id}/deepdive — trigger a deep-dive run. Can take tens
- * of seconds (Wikipedia grounding + confusant search + synthesis); callers
- * should show a clear loading state while this is in flight.
- */
-export function triggerDeepDive(
-	sightingId: string,
-	options?: RequestOptions
-): Promise<DeepDiveResult> {
-	return request<DeepDiveResult>(
-		'POST',
-		`/api/sightings/${encodeURIComponent(sightingId)}/deepdive`,
-		{},
-		{ timeoutMs: LONG_RUNNING_TIMEOUT_MS, ...options }
-	);
-}
-
-/**
- * GET /api/sightings/{id}/deepdive — the latest deep-dive result, or `null`
- * when none has been run yet (backend returns 404 in that case).
- */
-export async function getDeepDive(
-	sightingId: string,
-	options?: RequestOptions
-): Promise<DeepDiveResult | null> {
-	try {
-		return await request<DeepDiveResult>(
-			'GET',
-			`/api/sightings/${encodeURIComponent(sightingId)}/deepdive`,
-			undefined,
-			options
-		);
-	} catch (err) {
-		if (err instanceof ApiError && err.status === 404) return null;
-		throw err;
-	}
 }

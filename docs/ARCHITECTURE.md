@@ -1,18 +1,22 @@
 # Forage Buddy — Architecture & Module Contract
 
 > **Working name.** An AI foraging helper: you photograph a plant/fungus/etc.
-> in the field, the app records photo + GPS location + timestamp, a fast
-> "triage" pass tells you the likely genus (or says "I don't know, send more
-> photos" when it can't), and a slower "deep dive" pass grounds the best
-> guess in its Wikipedia article and surfaces dangerous look-alikes
-> ("confusant species") with a checklist of what to check to rule them out.
+> in the field, the app records photo + GPS location + timestamp, and ONE
+> automatic "identification" pipeline runs on every photo upload: it finds
+> candidate species (or honestly says "I don't know, send more photos" when
+> it can't), grounds each top candidate in its Wikipedia article, flags
+> edible/medicinal/psychoactive/poisonous facts, and surfaces dangerous
+> look-alikes ("confusant species") with a short note on how to tell them
+> apart. There is no separate manually-triggered second stage — the whole
+> pipeline is one automatic call, internally broken into three gatherer
+> stages (candidates, facts, risks) run by the `identification` module.
 >
-> **Safety is the entire point of the deep-dive stage.** Misidentifying a
-> mushroom or plant can kill. Every LLM prompt in this app, every API
-> response, and every screen that shows a species guess MUST carry a
-> prominent disclaimer: this is a research aid, not a field guide substitute,
-> and nothing it identifies should be eaten/used on the strength of its
-> output alone. Never soften or omit this.
+> **Safety is the entire point of this pipeline.** Misidentifying a mushroom
+> or plant can kill. Every LLM prompt in this app, every API response, and
+> every screen that shows a species guess MUST carry a prominent disclaimer:
+> this is a research aid, not a field guide substitute, and nothing it
+> identifies should be eaten/used on the strength of its output alone. Never
+> soften or omit this.
 
 ## Why this stack (mirrors `ai_buddy`, the sibling project)
 
@@ -29,10 +33,11 @@ over a `BLOB` embeddings table is plenty at personal-project scale.
 - **LLM:** OpenAI-compatible chat completions, provider-switchable (LiteLLM
   proxy by default, OpenRouter as the revert switch) — ported from
   `ai_buddy`'s `llm` module, **minus all wallet/billing/cost-estimation
-  code** (this app has no payments), **plus vision**: the triage pass sends
-  photos as `image_url` content parts (OpenAI vision format), so the
-  configured model must support image input. The existing default,
-  `openrouter/~anthropic/claude-haiku-latest`, already does.
+  code** (this app has no payments), **plus vision**: the identification
+  pipeline's candidate-gathering pass sends photos as `image_url` content
+  parts (OpenAI vision format), so the configured model must support image
+  input. The existing default, `openrouter/~anthropic/claude-haiku-latest`,
+  already does.
 - **RAG:** same brute-force-cosine-over-a-BLOB-column design as `ai_buddy`'s
   `vector` module, reused almost verbatim, for two independent corpora:
   Wikipedia article chunks (`kind='wikipedia'`) and curated confusant notes
@@ -46,19 +51,32 @@ over a `BLOB` embeddings table is plenty at personal-project scale.
 
 ```
 crates/core     forage-buddy-core: shared domain enums + device-token gen (no axum/sqlx/tauri)
-crates/server   the axum binary: auth, db, llm, photos, sightings, triage, species, wikipedia, vector, deepdive
+crates/server   the axum binary: auth, db, llm, photos, sightings, identification, species, wikipedia, vector, weather
 crates/mobile   Tauri 2 Android app wrapping web/build
-web/            SvelteKit SPA (capture → triage → deep-dive screens)
+web/            SvelteKit SPA (capture → identification screens)
 crates/server/migrations/
   0001_init.sql            users, device_tokens
   0002_sightings.sql       sightings table
   0003_photos.sql          photos table
-  0004_triage.sql          triage_results table
+  0004_triage.sql          triage_results table (OLD two-stage flow; kept for history, no longer written to)
   0005_species_reference.sql   curated species_reference + confusant_pairs (seeded)
   0006_wikipedia.sql       wikipedia_pages cache
   0007_vectors.sql         embeddings table (RAG, shared by wikipedia + confusant kinds)
-  0008_deepdive.sql        deepdive_results table
+  0008_deepdive.sql        deepdive_results table (OLD two-stage flow; kept for history, no longer written to)
+  0009_identification.sql     identification_results table (the current pipeline)
+  0010_species_facts_cache.sql species_facts_cache table (cross-sighting facts cache)
+  0011_identification_backfill.sql  one-time data migration: old triage/deepdive history -> identification_results
 ```
+
+**On the old `triage`/`deepdive` tables:** this app has real production data,
+so `0004_triage.sql`/`0008_deepdive.sql` and their tables are never dropped.
+Migration `0011` does a best-effort backfill of their history into the new
+`identification_results` shape (see that migration file's header comment for
+the exact mapping, including how the old `DangerLevel` vocabulary collapses
+onto the new confusant `danger_level` vocabulary). Going forward, nothing
+writes to `triage_results`/`deepdive_results` anymore — the Rust `triage`/
+`deepdive` modules themselves were deleted; only the migrations and their
+tables remain, as a historical record.
 
 ## Environment variables (all prefixed `FORAGEBUDDY_`)
 
@@ -77,8 +95,8 @@ Mirrors `ai_buddy`'s `AIBUDDY_*` naming exactly, module for module:
 | `FORAGEBUDDY_LLM_PROVIDER` | `litellm` | `litellm` or `openrouter` |
 | `FORAGEBUDDY_LITELLM_API_KEY` / `FORAGEBUDDY_LITELLM_BASE_URL` | unset / `https://litellm.osmosis.page/v1` | |
 | `FORAGEBUDDY_OPENROUTER_API_KEY` | unset | Used when provider=openrouter, and always for embeddings fallback per ai_buddy's logic |
-| `FORAGEBUDDY_CHAT_MODEL` | `openrouter/~anthropic/claude-haiku-latest` | Must be vision-capable — used for triage |
-| `FORAGEBUDDY_DEEPDIVE_MODEL` | same as `FORAGEBUDDY_CHAT_MODEL` | Model for deep-dive's confusant-enrichment and safety-notes synthesis — off triage's "need an answer in seconds" path, so a stronger/slower model than triage is a reasonable choice here |
+| `FORAGEBUDDY_CHAT_MODEL` | `openrouter/~anthropic/claude-haiku-latest` | Must be vision-capable — used by the identification pipeline's candidate-gathering pass |
+| `FORAGEBUDDY_IDENTIFICATION_MODEL` | same as `FORAGEBUDDY_CHAT_MODEL` | Model for the identification pipeline's facts + risks gatherers (species facts lookup, confusant-enrichment tool calls) — off the candidate gatherer's "need an answer in seconds" path, so a stronger/slower model is a reasonable choice here |
 | `FORAGEBUDDY_ALLOWED_CHAT_MODELS` | same + `gemma4-26b` | comma-separated |
 | `FORAGEBUDDY_EMBEDDING_MODEL` / `FORAGEBUDDY_EMBEDDING_DIM` | `bge-m3` / `1024` | |
 | `FORAGEBUDDY_CORS_ORIGINS` | dev localhost + `http://tauri.localhost` | |
@@ -91,9 +109,17 @@ lowercase TEXT in SQLite, serialized as the same string over JSON:
 
 ```rust
 SightingStatus { Open => "open", Archived => "archived" }
-TriageStatus   { Insufficient => "insufficient", GenusCandidate => "genus_candidate", SpeciesCandidate => "species_candidate" }
-DangerLevel    { Unknown => "unknown", Safe => "safe", Caution => "caution", Toxic => "toxic", DeadlyToxic => "deadly_toxic" }
+TriageStatus   { Insufficient => "insufficient", GenusCandidate => "genus_candidate", SpeciesCandidate => "species_candidate" }  // OLD, kept only for the 0004 migration's history; no longer produced
+DangerLevel    { Unknown => "unknown", Safe => "safe", Caution => "caution", Toxic => "toxic", DeadlyToxic => "deadly_toxic" }   // still the curated species_reference/confusant_pairs vocabulary
 ```
+
+The identification pipeline's own `IdentificationStatus`
+(`pending`/`partial`/`complete`/`insufficient`/`failed`) and confusant
+`danger_level` (`unknown`/`mild`/`toxic`/`deadly_toxic`) are server-only
+types defined in `crates/server/src/identification/mod.rs`, not in
+`forage-buddy-core` — the mobile crate only wraps the web build and never
+needs them as Rust types. See that module's doc comments for the mapping
+from the old 5-level `DangerLevel` vocabulary onto the new 4-level one.
 
 `device_token` module: byte-for-byte copy of `ai_buddy_core::device_token`.
 
@@ -130,7 +156,8 @@ CREATE TABLE photos (
 );
 CREATE INDEX idx_photos_sighting ON photos(sighting_id, sort_order);
 
--- 0004_triage.sql
+-- 0004_triage.sql (OLD two-stage flow — kept for history, no longer written to;
+-- see 0011_identification_backfill.sql and the "identification pipeline" section below)
 CREATE TABLE triage_results (
     id             TEXT PRIMARY KEY,
     sighting_id    TEXT NOT NULL REFERENCES sightings(id),
@@ -188,7 +215,7 @@ CREATE TABLE embeddings (
 );
 CREATE INDEX idx_embeddings_kind_source ON embeddings(kind, source_id);
 
--- 0008_deepdive.sql
+-- 0008_deepdive.sql (OLD two-stage flow — kept for history, no longer written to)
 CREATE TABLE deepdive_results (
     id                TEXT PRIMARY KEY,
     sighting_id       TEXT NOT NULL REFERENCES sightings(id),
@@ -203,6 +230,42 @@ CREATE TABLE deepdive_results (
     safety_notes      TEXT NOT NULL    -- always non-empty, always includes the standard disclaimer
 );
 CREATE INDEX idx_deepdive_sighting ON deepdive_results(sighting_id, created_at DESC);
+
+-- 0009_identification.sql (the CURRENT, single pipeline)
+CREATE TABLE identification_results (
+    id                 TEXT PRIMARY KEY,
+    sighting_id        TEXT NOT NULL REFERENCES sightings(id),
+    created_at         TEXT NOT NULL,
+    updated_at         TEXT NOT NULL,
+    status             TEXT NOT NULL CHECK(status IN ('pending','partial','complete','insufficient','failed')),
+    model              TEXT NOT NULL,
+    candidates_json    TEXT NOT NULL DEFAULT '[]',   -- JSON array, see IdentificationResultDto below
+    missing_info_json  TEXT NOT NULL DEFAULT '[]',   -- JSON array of strings
+    photos_considered  INTEGER NOT NULL
+);
+CREATE INDEX idx_identification_sighting ON identification_results(sighting_id, created_at DESC);
+
+-- 0010_species_facts_cache.sql (cross-sighting, cross-user read-through cache
+-- for the facts gatherer — one row per normalized species/genus name, reused
+-- regardless of which sighting asked about it first)
+CREATE TABLE species_facts_cache (
+    species_key     TEXT PRIMARY KEY,   -- lowercased "genus species" or bare genus
+    wikipedia_title  TEXT,
+    wikipedia_url    TEXT,
+    edible           INTEGER,           -- nullable 0/1 boolean
+    medicinal        INTEGER,
+    psychoactive     INTEGER,
+    poisonous        INTEGER,
+    danger_level     TEXT,              -- internal 5-level DangerLevel representation (curated-floor-reconciled)
+    risk_note        TEXT NOT NULL,
+    source_model     TEXT NOT NULL,
+    fetched_at       TEXT NOT NULL
+);
+
+-- 0011_identification_backfill.sql: a one-time INSERT...SELECT (no new
+-- table) that converts each sighting's latest triage_results row (+ latest
+-- deepdive_results row, if any) into one identification_results row. See
+-- that file's header comment for the exact field-by-field mapping.
 ```
 
 ## Backend module contracts (cross-module call signatures — DO NOT rename)
@@ -231,8 +294,8 @@ impl LlmClient {
         &self, model: &str, system: &str, user_text: &str, images: &[String],
     ) -> AppResult<T>;
 
-    /// Raw tool-calling turn (OpenAI `tools` format) — used by the deep-dive
-    /// Wikipedia-agentic-query loop.
+    /// Raw tool-calling turn (OpenAI `tools` format) — used by the
+    /// identification pipeline's risks gatherer's Wikipedia-agentic-query loop.
     pub async fn chat_tools(&self, model: &str, messages: Vec<serde_json::Value>, tools: &serde_json::Value) -> AppResult<ToolTurn>;
 
     pub async fn embed(&self, text: &str) -> AppResult<Vec<f32>>;
@@ -240,43 +303,56 @@ impl LlmClient {
 ```
 
 ```rust
-// crates/server/src/vector/mod.rs — owned by the "deepdive" agent (ported from ai_buddy)
+// crates/server/src/vector/mod.rs (ported from ai_buddy)
 pub async fn upsert(db: &SqlitePool, kind: &str, source_id: &str, model: &str, text: &str, vec: &[f32]) -> AppResult<()>;
 pub async fn search(db: &SqlitePool, kind: &str, query_vec: &[f32], top_k: usize) -> AppResult<Vec<(String /* source_id */, String /* text */, f32 /* score */)>>;
 ```
 
 ```rust
-// crates/server/src/photos/mod.rs — owned by the "photos" agent
+// crates/server/src/photos/mod.rs
 pub fn router() -> Router<AppState>;  // POST /api/sightings/{id}/photos (multipart), GET /api/photos/{id}/file
 
 /// Called by the upload handler after the file is persisted and the row
 /// inserted. Fire-and-forget from the HTTP handler's point of view: spawn
-/// it, log failures, never fail the upload response on a triage error.
+/// it, log failures, never fail the upload response on an identification
+/// error.
 pub async fn on_photo_uploaded(state: AppState, sighting_id: String);
 ```
 
 ```rust
-// crates/server/src/triage/mod.rs — owned by the "triage" agent
-pub async fn run_triage(state: &AppState, sighting_id: &str) -> AppResult<TriageResultDto>;
-pub fn router() -> Router<AppState>;  // GET /api/sightings/{id}/triage (history), POST .../triage (manual re-run)
+// crates/server/src/identification/mod.rs — the single identification pipeline
+pub async fn run_identification(state: &AppState, sighting_id: &str) -> AppResult<()>;
+pub async fn get_latest(db: &SqlitePool, sighting_id: &str) -> AppResult<Option<IdentificationResultDto>>;
+pub async fn get_history(db: &SqlitePool, sighting_id: &str) -> AppResult<Vec<IdentificationResultDto>>;
+pub fn router() -> Router<AppState>;  // GET /api/sightings/{id}/identification (history), POST .../identification (manual re-run/retry)
+
+// Internal gatherer stages (also independently callable/testable):
+pub async fn gather_candidates(state: &AppState, sighting_id: &str) -> AppResult<CandidateGatherResult>;
+pub async fn gather_facts(state: &AppState, candidate_species: &str) -> SpeciesFacts;      // infallible, best-effort
+pub async fn gather_risks(state: &AppState, candidate_species: &str) -> Vec<ConfusantSummaryDto>; // infallible, best-effort
+pub fn compile_identification(status: IdentificationStatus, created_at: String, candidates: Vec<EnrichedCandidate>, missing_info: Vec<String>) -> IdentificationResultDto; // pure, not an LLM call
 ```
 
 ```rust
-// crates/server/src/deepdive/mod.rs — owned by the "deepdive" agent
-pub async fn run_deepdive(state: &AppState, sighting_id: &str) -> AppResult<DeepDiveDto>;
-pub fn router() -> Router<AppState>;  // POST /api/sightings/{id}/deepdive (trigger), GET .../deepdive (latest)
-```
-
-```rust
-// crates/server/src/sightings/mod.rs — owned by the "photos" agent (sightings + photos are one agent's scope)
+// crates/server/src/sightings/mod.rs (sightings + photos are one module's scope)
 pub fn router() -> Router<AppState>;
 ```
 
-`photos::on_photo_uploaded` calls `triage::run_triage` internally — that's
-the ONE cross-agent function call in the whole backend. Both agents must
-match the signature above exactly (`AppState` owned, `sighting_id: &str`,
-returns `AppResult<TriageResultDto>`); `on_photo_uploaded` ignores the `Ok`
-value and logs `Err`.
+`photos::on_photo_uploaded` calls `identification::run_identification`
+internally — that's the ONE cross-module call on the upload path (down from
+two separate calls — `triage::run_triage` then `deepdive::run_deepdive` — in
+the old design). `on_photo_uploaded` ignores the `Ok` value and logs `Err`.
+
+Every call to `on_photo_uploaded` first acquires a permit from
+`AppState.identification_semaphore` (process-wide, capacity 1). Uploading
+several photos for one sighting in quick succession (a multi-select) spawns
+one `on_photo_uploaded` task per photo; without this, each would start its
+own full gather-then-compile pipeline concurrently against the same
+sighting, racing writes to the same `identification_results` row and paying
+for overlapping LLM calls. The semaphore only serializes — it does not
+dedupe, so N photos uploaded back-to-back still run N full pipelines
+sequentially rather than one; accepted as a minor cost inefficiency at this
+app's scale.
 
 ## REST API surface (all `/api/*` require auth; same auth model as `ai_buddy`)
 
@@ -284,103 +360,127 @@ value and logs `Err`.
 - **Sightings:**
   `POST /api/sightings` `{lat?, lon?, location_accuracy_m?, place_label?, observed_at, notes?}` → sighting
   `GET /api/sightings` → list, newest first
-  `GET /api/sightings/{id}` → sighting + its photos + latest triage + latest deepdive (one aggregate view — the frontend should need exactly one request to render the detail screen)
+  `GET /api/sightings/{id}` → sighting + its photos + latest identification (one aggregate view — the frontend should need exactly one request to render the detail screen)
   `PATCH /api/sightings/{id}` `{notes?, status?}`
 - **Photos:**
   `POST /api/sightings/{id}/photos` — multipart, field `photo` (+ optional `taken_at`, `lat`, `lon` fields overriding the sighting's own if the user moved between shots); triggers `on_photo_uploaded` after commit
   `GET /api/photos/{id}/file` — streams the original image (auth + ownership checked)
-- **Triage:** `GET /api/sightings/{id}/triage` (full history, newest first) · `POST /api/sightings/{id}/triage` (manual re-run, e.g. after notes edited)
-- **Deep dive:** `POST /api/sightings/{id}/deepdive` · `GET /api/sightings/{id}/deepdive`
+- **Identification:** `GET /api/sightings/{id}/identification` (full history, newest first) · `POST /api/sightings/{id}/identification` (manual re-run/retry, e.g. after notes edited or a prior attempt failed)
+- **Weather:** `GET /api/weather?lat=&lon=` → last 14 days of daily historical weather (`temp_max_c`/`temp_min_c`/`temp_mean_c`/`precipitation_mm`/`rain_mm`/`wind_speed_max_kmh`/`wind_speed_mean_kmh`/`humidity_mean_pct` per day), via `weather::fetch_last_14_days` (Open-Meteo Archive API, no key required). Groundwork for a future season/weather-aware foraging-suggestion feature; not called from the frontend yet.
 
 Every error response is `{"message": "..."}` (see `ai_buddy`'s `AppError`,
 ported as-is minus `PaymentRequired`).
 
-## The two LLM-driven stages, in detail
+## The identification pipeline, in detail
 
-### 1. Triage (fast, cheap, runs automatically on every photo upload)
+Runs automatically on every photo upload (`photos::on_photo_uploaded` calls
+`identification::run_identification` directly) and can be manually re-run
+via `POST /api/sightings/{id}/identification`. `run_identification`
+orchestrates three internal gatherer stages — NOT separate processes, just
+named, narrowly-scoped calls:
 
-System prompt directs the model to: identify the most likely **genus**
-(and, if confident, species) of the organism in the photo(s), using the
-photos + the sighting's lat/lon + observed_at (season/geography narrows
-candidates a lot) + any prior triage attempt's `missing_info` (so follow-up
-photos answer what was asked). It MUST be willing to return
-`status: "insufficient"` with concrete `missing_info` (e.g. "photo of the
-gill attachment to the stem", "photo of the underside/pores", "a spore
-print", "the full plant including root/base") rather than guess. Output is
-one `chat_json_vision` call, schema:
+1. **Candidates** (`gather_candidates`, fast/cheap vision call) — identifies
+   the most likely species (or genus, when species-level confidence isn't
+   there) from the photo(s), using the photos + the sighting's lat/lon +
+   observed_at (season/geography narrows candidates a lot) + any prior
+   attempt's `missing_info` (so follow-up photos answer what was asked). It
+   MUST be willing to return an EMPTY candidates array with concrete
+   `missing_info` (e.g. "photo of the gill attachment to the stem", "photo
+   of the underside/pores", "a spore print", "the full plant including
+   root/base") rather than guess. One `chat_json_vision` call on
+   `FORAGEBUDDY_CHAT_MODEL`.
+2. **Facts** (`gather_facts`, per top candidate, runs concurrently with
+   step 3) — read-through `species_facts_cache` keyed on the normalized
+   species/genus name; on a cache miss, resolves the best Wikipedia article
+   (try `species_reference.wikipedia_title` first, else the species name)
+   via `wikipedia::fetch_or_cache`, then one `chat_json` call on
+   `FORAGEBUDDY_IDENTIFICATION_MODEL` extracting
+   `{edible, medicinal, psychoactive, poisonous, risk_note}` (`risk_note`
+   truncated to 140 chars in code — never trusted to self-limit), then
+   writes through the cache. **Curated reference data is a floor, never a
+   ceiling**: if `species::lookup` finds a curated `species_reference` row,
+   its `danger_level` can only be *raised*, never lowered, by the LLM's own
+   `poisonous` guess (see `identification::reconcile_danger`).
+3. **Risks** (`gather_risks`, per top candidate, runs concurrently with
+   step 2) — queries `confusant_pairs` for the candidate (and its
+   genus-mates) first (curated, trustworthy, offline); then runs one
+   `chat_tools` loop on `FORAGEBUDDY_IDENTIFICATION_MODEL` where the model
+   can call a `search_wikipedia` tool (semantic search over embeddings this
+   step grounds via `wikipedia::fetch_or_cache` + `vector::upsert`) to
+   extend the confusant list. Always merges in the curated pairs even if the
+   model's tool loop fails or times out — curated data must never be lost
+   to an LLM hiccup. Output is condensed to one short phrase per confusant
+   (species + danger level + a ≤100-char distinguishing note) — no
+   checklist arrays, no paragraph notes.
+
+`run_identification`'s lifecycle: INSERT a `pending` row immediately → run
+the candidates gatherer → UPDATE to `partial` (or `insufficient` if no
+candidates were found, in which case the pipeline stops here) → run the
+facts+risks gatherers concurrently per top candidate (capped to the top 3 by
+confidence) → `compile_identification` (pure Rust, NOT an LLM call: merges
+everything, enforces every text-field length cap, sorts candidates by
+confidence descending, caps to 3) → UPDATE to `complete`. On any
+unrecoverable error at any step, UPDATE to `failed` rather than leaving the
+row stuck at `pending`/`partial` forever.
+
+Exact response/stored JSON shape (`IdentificationResultDto`):
 
 ```json
 {
-  "status": "insufficient" | "genus_candidate" | "species_candidate",
-  "genus": "Amanita" | null,
-  "candidate_species": [{"species": "Amanita phalloides", "common_name": "Death cap", "confidence": 0.62}],
-  "missing_info": ["a clear photo of the gills", "..."],
-  "reasoning": "one or two sentences"
+  "status": "pending|partial|complete|insufficient|failed",
+  "created_at": "...",
+  "candidates": [
+    {
+      "species": "Laetiporus sulphureus",
+      "common_name": "Chicken of the woods",
+      "confidence": 0.74,
+      "edible": true, "medicinal": false, "psychoactive": false, "poisonous": false,
+      "wikipedia_url": "https://en.wikipedia.org/wiki/...",
+      "risk_note": "short phrase, ≤140 chars",
+      "confusants": [ {"species": "...", "danger_level": "unknown|mild|toxic|deadly_toxic", "note": "≤100 chars", "wikipedia_url": "..."} ]
+    }
+  ],
+  "missing_info": ["..."]
 }
 ```
 
-### 2. Deep dive (slower, auto-triggered the first time triage reaches a genus/species candidate)
-
-This is core safety functionality, not an optional extra behind a button —
-`photos::on_photo_uploaded` fires it automatically right after triage, the
-same way it fires triage itself after an upload (see the end of that
-function). It only auto-fires once per sighting (gated on
-`deepdive::has_any_result`); a manual "Re-run deep dive" stays available on
-the detail screen for re-running it later (e.g. after adding more photos).
-
-A short in-process pipeline of LLM calls (NOT separate processes — just
-named, narrowly-scoped calls, matching the "a few more subagents" framing
-from the product brief):
-
-1. **Wikipedia grounding** — resolve the best Wikipedia article for the
-   top candidate species (try `species_reference.wikipedia_title` first,
-   else the species name, else the genus) via the public REST API
-   (`https://en.wikipedia.org/api/rest_v1/page/summary/{title}` for the
-   extract, `.../page/html/{title}` or the `action=query&prop=extracts` API
-   for a longer body if the summary is too thin). Cache in
-   `wikipedia_pages`, chunk (~1000 chars, paragraph-aligned) and embed into
-   `embeddings` with `kind='wikipedia'`.
-2. **Look-alike / confusant finder** — query `confusant_pairs` for the
-   candidate (and its genus-mates) first (curated, trustworthy, offline);
-   then run one `chat_tools` loop where the model can call a `search_wikipedia`
-   tool (semantic search over the embeddings from step 1, plus it may fetch
-   ONE more article via the same Wikipedia client if it names a specific
-   look-alike not yet cached) to extend/verify the confusant list and fill in
-   `distinguishing_features`. Always merge in the curated pairs even if the
-   model's tool loop fails or times out — curated data must never be lost to
-   an LLM hiccup.
-3. **Synthesis** — one final `chat_json` call (text-only) that combines the
-   candidate, the Wikipedia extract, and the merged confusant list into the
-   `DeepDiveDto` stored in `deepdive_results`. `safety_notes` always starts
-   with the standard disclaimer (hardcode a constant the LLM text is
-   appended to — never rely on the model to include it).
+Booleans may be `null` when unknown (never a forced guess).
 
 ## Frontend screens (SvelteKit, `web/src/routes/`)
 
 - `/` — list of sightings (newest first), each row: thumbnail, place/time,
-  status badge (Insufficient / Genus: X / Species: X / Deep-dive done).
+  status badge (Insufficient / top candidate species+confidence / a danger
+  badge when the identification found a risky candidate or confusant).
 - `/sightings/new` — capture flow: `<input type="file" accept="image/*"
   capture="environment">` (works in both browser and the Tauri Android
   webview — no native camera plugin needed), geolocation via
   `@tauri-apps/plugin-geolocation` (native) falling back to
   `navigator.geolocation` (web), date/time defaults to now but is editable.
   Creates the sighting, uploads the first photo, redirects to its detail page.
-- `/sightings/[id]` — photo gallery + "add another photo" (re-runs triage),
-  triage card (status, genus/species guesses with confidence bars, or the
-  "I'm not sure yet — send a photo of…" prompt rendered prominently),
-  "Run deep dive" button (enabled once status ≠ insufficient), deep-dive
-  card: best match, Wikipedia summary + link, a visually distinct
-  **"Could be confused with"** section per confusant (danger-level colored
-  badge: grey=unknown, green=safe, yellow=caution, orange=toxic, red=deadly
-  toxic) each with its distinguishing-features checklist rendered as an
-  actual `<ul>` of checkboxes the user can tick off while re-examining their
-  specimen. A persistent, unmissable safety banner on every screen that
-  shows a species guess.
+- `/sightings/[id]` — photo gallery + "add another photo" (re-runs
+  identification automatically), one identification card: status, each
+  candidate with confidence bar + edible/medicinal/psychoactive/poisonous
+  flags + Wikipedia link + risk note, or the "I'm not sure yet — send a
+  photo of…" prompt rendered prominently when `insufficient`; a visually
+  distinct **"Could be confused with"** section per confusant (danger-level
+  colored badge: grey=unknown, yellow=mild, orange=toxic, red=deadly toxic)
+  with its short distinguishing note. A manual "Re-run identification"
+  action stays available (e.g. after adding more photos or notes).
 
-## Safety disclaimer (exact text, used in both backend constant and frontend)
+## Safety disclaimer + poisonous warning (frontend-only; not enforced by the backend)
 
-> "Forage Buddy gives a best-effort AI guess, not a confirmed identification.
-> Never eat, use, or handle anything based solely on this app. Misidentifying
-> a wild plant or fungus can cause severe illness or death. Confirm with a
-> qualified local expert, a spore print, and multiple field guides before
-> consuming or using anything you forage."
+Replaces the old passive banner with two gated modals
+(`web/src/lib/components/SafetyAckModal.svelte` /
+`PoisonousWarningModal.svelte`), both pure frontend UX — the backend has no
+corresponding check, token, or enforcement for either:
+
+- **`SafetyAckModal`**: shown once per session before any identification
+  result is visible. Exact text: "Results are fetched by AI and can
+  therefore be wildly inaccurate. Say it with me: never munch on a hunch."
+  The user must type "never munch on a hunch" (case-insensitive) before a
+  "Continue" button enables.
+- **`PoisonousWarningModal`**: a separate alert triggered the first time a
+  `complete` identification result has any candidate with `poisonous ===
+  true`. Exact text: "⚠️ There's a chance this specimen is poisonous! Be
+  very careful!" Shown once per sighting view (not re-triggered on every
+  poll tick), resets on manual re-identify.

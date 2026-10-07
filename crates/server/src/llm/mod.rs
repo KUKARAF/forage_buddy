@@ -80,10 +80,10 @@ struct Inner {
     chat_api_key: Option<String>,
     /// Default chat model when the caller passes an unknown/empty model.
     default_chat_model: String,
-    /// Model for deep-dive's confusant-enrichment and safety-notes-synthesis
-    /// calls — see `Config::deepdive_chat_model`'s doc comment. Falls back to
-    /// `default_chat_model` when `FORAGEBUDDY_DEEPDIVE_MODEL` is unset.
-    deepdive_chat_model: String,
+    /// Model for the identification pipeline's facts/risks gatherers — see
+    /// `Config::identification_chat_model`'s doc comment. Falls back to
+    /// `default_chat_model` when `FORAGEBUDDY_IDENTIFICATION_MODEL` is unset.
+    identification_chat_model: String,
     /// Chat model ids a caller may select.
     allowed_chat_models: Vec<String>,
     /// Full embeddings URL (provider-dependent).
@@ -149,7 +149,7 @@ impl LlmClient {
                 chat_url,
                 chat_api_key,
                 default_chat_model: config.chat_model.clone(),
-                deepdive_chat_model: config.deepdive_chat_model.clone(),
+                identification_chat_model: config.identification_chat_model.clone(),
                 allowed_chat_models: config.allowed_chat_models.clone(),
                 embed_url,
                 embed_api_key,
@@ -164,10 +164,10 @@ impl LlmClient {
         &self.inner.default_chat_model
     }
 
-    /// The configured deep-dive chat model (falls back to the default chat
-    /// model when `FORAGEBUDDY_DEEPDIVE_MODEL` is unset).
-    pub fn deepdive_chat_model(&self) -> &str {
-        &self.inner.deepdive_chat_model
+    /// The configured identification-pipeline chat model (falls back to the
+    /// default chat model when `FORAGEBUDDY_IDENTIFICATION_MODEL` is unset).
+    pub fn identification_chat_model(&self) -> &str {
+        &self.inner.identification_chat_model
     }
 
     /// Resolve a requested model to a usable one: return `requested` when it

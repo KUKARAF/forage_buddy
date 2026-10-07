@@ -1,36 +1,35 @@
 <script lang="ts">
-	// The list screen's per-row status badge. Priority, per ARCHITECTURE.md:
-	// if a deep-dive exists, its highest-danger confusant's color is the
-	// safety-forward signal (even if triage itself says "species_candidate");
-	// otherwise fall back to the plain triage-status badge:
-	//   insufficient      -> grey  "Needs more photos"
-	//   genus_candidate   -> amber "Genus: {genus}"
-	//   species_candidate -> green "Species: {name}"
+	// The list screen's per-row status badge. Priority (best guess — see the
+	// `SightingListItem` doc comment in $lib/api/client for the "not
+	// confirmed against the backend rewrite" caveat on these field names):
+	// if the latest identification result has a known danger level, that
+	// color is the safety-forward signal; otherwise fall back to a plain
+	// status badge for pending/partial/insufficient/complete/failed.
 	import type { SightingListItem } from '$lib/api/client';
 	import DangerBadge from './DangerBadge.svelte';
 
 	let { item }: { item: SightingListItem } = $props();
 
-	const dangerLevel = $derived(item.latest_deepdive_danger_level ?? null);
+	const dangerLevel = $derived(item.latest_identification_danger_level ?? null);
 </script>
 
 {#if dangerLevel}
 	<DangerBadge
 		level={dangerLevel}
-		label={item.latest_deepdive_best_match_species
-			? `Look-alike risk: ${item.latest_deepdive_best_match_species}`
+		label={item.latest_identification_species
+			? `Look-alike risk: ${item.latest_identification_species}`
 			: undefined}
 	/>
-{:else if item.latest_triage_status === 'insufficient'}
+{:else if item.latest_identification_status === 'pending' || item.latest_identification_status === 'partial'}
+	<span class="status-badge grey">Identifying…</span>
+{:else if item.latest_identification_status === 'insufficient'}
 	<span class="status-badge grey">Needs more photos</span>
-{:else if item.latest_triage_status === 'genus_candidate'}
-	<span class="status-badge amber">Genus: {item.latest_triage_genus ?? '?'}</span>
-{:else if item.latest_triage_status === 'species_candidate'}
-	<span class="status-badge green"
-		>Species: {item.latest_triage_species ?? item.latest_triage_genus ?? '?'}</span
-	>
+{:else if item.latest_identification_status === 'complete'}
+	<span class="status-badge green">Species: {item.latest_identification_species ?? '?'}</span>
+{:else if item.latest_identification_status === 'failed'}
+	<span class="status-badge amber">Identification failed</span>
 {:else}
-	<span class="status-badge grey">No triage yet</span>
+	<span class="status-badge grey">No identification yet</span>
 {/if}
 
 <style>

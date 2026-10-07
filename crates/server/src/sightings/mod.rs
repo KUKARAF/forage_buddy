@@ -2,18 +2,18 @@
 //! view the frontend's detail screen renders from a single request.
 //!
 //! Owns migration `0002_sightings.sql` (`sightings`). Also reads (but does
-//! not own) `photos` (the `photos` module, same agent), `triage_results`
-//! (the `triage` module) and `deepdive_results` (the `deepdive` module) —
-//! those two tables' schemas are fixed by `docs/ARCHITECTURE.md` and are
-//! queried directly here to build the detail aggregate without an extra
-//! cross-module call.
+//! not own) `photos` (the `photos` module, same agent) and
+//! `identification_results` (the `identification` module, via its own
+//! `identification::get_latest` for the detail aggregate, plus a direct
+//! correlated subquery here for the list screen's cheap summary — same
+//! pattern the old triage/deepdive-reading code used).
 //!
 //! Routes (all require auth, scoped to the caller's own `user_id` — a
 //! sighting owned by someone else 404s rather than 403s, so existence is
 //! never leaked):
 //!   - `POST  /api/sightings`      create a sighting (status `open`)
 //!   - `GET   /api/sightings`      list the caller's sightings, newest first
-//!   - `GET   /api/sightings/{id}` sighting + photos + latest triage + latest deepdive
+//!   - `GET   /api/sightings/{id}` sighting + photos + latest identification
 //!   - `PATCH /api/sightings/{id}` update `notes`/`status`
 
 use axum::extract::{Path, State};
@@ -30,6 +30,7 @@ use forage_buddy_core::domain::SightingStatus;
 
 use crate::auth::session::RequireAuth;
 use crate::error::{AppError, AppResult};
+use crate::identification::IdentificationResultDto;
 use crate::photos::PhotoView;
 use crate::state::AppState;
 
@@ -64,26 +65,28 @@ pub struct SightingSummary {
     pub lat: Option<f64>,
     pub lon: Option<f64>,
     pub status: String,
-    pub latest_triage_status: Option<String>,
-    pub latest_triage_genus: Option<String>,
-    /// The top-confidence candidate species name from the latest triage
-    /// attempt, if any were named (regardless of `latest_triage_status` —
-    /// a `genus_candidate` attempt can still list species-level guesses).
-    pub latest_triage_species: Option<String>,
-    /// `best_match_species` from the latest deep-dive, if one has been run.
-    pub latest_deepdive_best_match_species: Option<String>,
-    /// The single highest-severity `danger_level` among the latest
-    /// deep-dive's confusants, if any — lets the list screen show a safety
-    /// signal (e.g. a red badge for a `deadly_toxic` look-alike) without a
-    /// second request per row.
-    pub latest_deepdive_danger_level: Option<String>,
+    /// Status of the sighting's latest identification attempt
+    /// (`pending`/`partial`/`complete`/`insufficient`/`failed`), if one has
+    /// ever been run.
+    pub latest_identification_status: Option<String>,
+    /// The top-confidence candidate species name from the latest
+    /// identification attempt, if any were named.
+    pub latest_identification_species: Option<String>,
+    /// The single highest-severity danger signal among the latest
+    /// identification's candidates (each candidate's own `poisonous` flag,
+    /// plus every confusant's `danger_level`) — lets the list screen show a
+    /// safety signal (e.g. a red badge for a `deadly_toxic` look-alike)
+    /// without a second request per row. One of `unknown`/`mild`/`toxic`/
+    /// `deadly_toxic`, matching the identification API's vocabulary.
+    pub latest_identification_danger_level: Option<String>,
     pub photo_count: i64,
     pub thumbnail_photo_id: Option<String>,
 }
 
-/// Raw row shape for the list query — carries the two JSON TEXT columns
-/// needed to derive `latest_triage_species`/`latest_deepdive_danger_level`
-/// before they're reduced into `SightingSummary`.
+/// Raw row shape for the list query — carries the latest identification's
+/// JSON TEXT column needed to derive `latest_identification_species`/
+/// `latest_identification_danger_level` before they're reduced into
+/// `SightingSummary`.
 #[derive(sqlx::FromRow)]
 struct SightingSummaryRow {
     id: String,
@@ -93,69 +96,81 @@ struct SightingSummaryRow {
     lat: Option<f64>,
     lon: Option<f64>,
     status: String,
-    latest_triage_status: Option<String>,
-    latest_triage_genus: Option<String>,
-    latest_triage_candidate_species_json: Option<String>,
-    latest_deepdive_best_match_species: Option<String>,
-    latest_deepdive_confusants_json: Option<String>,
+    latest_identification_status: Option<String>,
+    latest_identification_candidates_json: Option<String>,
     photo_count: i64,
     thumbnail_photo_id: Option<String>,
 }
 
-/// Severity ordering for `DangerLevel` string values, highest-last so a
-/// simple `max_by_key` picks the most alarming entry. Unrecognized/missing
-/// values sort as `unknown` (lowest) rather than erroring — this is a
-/// display nicety, never a source of truth for safety data.
+/// Severity ordering for the identification API's condensed `danger_level`
+/// vocabulary, highest-last so a simple `max_by_key` picks the most
+/// alarming entry. Unrecognized/missing values sort as `unknown` (lowest)
+/// rather than erroring — this is a display nicety, never a source of truth
+/// for safety data.
 fn danger_severity(level: &str) -> u8 {
     match level {
-        "safe" => 1,
-        "caution" => 2,
-        "toxic" => 3,
-        "deadly_toxic" => 4,
+        "mild" => 1,
+        "toxic" => 2,
+        "deadly_toxic" => 3,
         _ => 0, // "unknown" or anything unrecognized
     }
 }
 
-/// The top-confidence `species` name out of a `candidate_species_json` TEXT
-/// column, or `None` if absent/empty/unparseable.
+/// The top-confidence candidate's `species` name out of a `candidates_json`
+/// TEXT column, or `None` if absent/empty/unparseable. Candidates are
+/// already sorted by confidence (descending) by
+/// `identification::compile_candidates`, so the first entry is the top one.
 fn top_candidate_species(raw: Option<&str>) -> Option<String> {
     #[derive(Deserialize)]
     struct Candidate {
         species: String,
-        #[serde(default)]
-        confidence: f64,
     }
     let raw = raw?;
     let candidates: Vec<Candidate> = serde_json::from_str(raw).ok()?;
-    candidates
-        .into_iter()
-        .max_by(|a, b| a.confidence.total_cmp(&b.confidence))
-        .map(|c| c.species)
+    candidates.into_iter().next().map(|c| c.species)
 }
 
-/// The highest-severity `danger_level` out of a `confusants_json` TEXT
-/// column, or `None` if absent/empty/unparseable.
-fn highest_confusant_danger(raw: Option<&str>) -> Option<String> {
+/// The highest-severity danger signal across every candidate's `poisonous`
+/// flag and every confusant's `danger_level`, out of a `candidates_json`
+/// TEXT column, or `None` if absent/empty/unparseable.
+fn highest_danger_level(raw: Option<&str>) -> Option<String> {
     #[derive(Deserialize)]
-    struct ConfusantLevel {
+    struct Confusant {
         danger_level: String,
     }
+    #[derive(Deserialize)]
+    struct Candidate {
+        #[serde(default)]
+        poisonous: Option<bool>,
+        #[serde(default)]
+        confusants: Vec<Confusant>,
+    }
     let raw = raw?;
-    let confusants: Vec<ConfusantLevel> = serde_json::from_str(raw).ok()?;
-    confusants
+    let candidates: Vec<Candidate> = serde_json::from_str(raw).ok()?;
+
+    let mut levels: Vec<&str> = Vec::new();
+    for candidate in &candidates {
+        if candidate.poisonous == Some(true) {
+            levels.push("toxic");
+        }
+        for confusant in &candidate.confusants {
+            levels.push(confusant.danger_level.as_str());
+        }
+    }
+    levels
         .into_iter()
-        .max_by_key(|c| danger_severity(&c.danger_level))
-        .map(|c| c.danger_level)
+        .max_by_key(|level| danger_severity(level))
+        .map(str::to_string)
 }
 
 impl From<SightingSummaryRow> for SightingSummary {
     fn from(row: SightingSummaryRow) -> Self {
         SightingSummary {
-            latest_triage_species: top_candidate_species(
-                row.latest_triage_candidate_species_json.as_deref(),
+            latest_identification_species: top_candidate_species(
+                row.latest_identification_candidates_json.as_deref(),
             ),
-            latest_deepdive_danger_level: highest_confusant_danger(
-                row.latest_deepdive_confusants_json.as_deref(),
+            latest_identification_danger_level: highest_danger_level(
+                row.latest_identification_candidates_json.as_deref(),
             ),
             id: row.id,
             created_at: row.created_at,
@@ -164,109 +179,9 @@ impl From<SightingSummaryRow> for SightingSummary {
             lat: row.lat,
             lon: row.lon,
             status: row.status,
-            latest_triage_status: row.latest_triage_status,
-            latest_triage_genus: row.latest_triage_genus,
-            latest_deepdive_best_match_species: row.latest_deepdive_best_match_species,
+            latest_identification_status: row.latest_identification_status,
             photo_count: row.photo_count,
             thumbnail_photo_id: row.thumbnail_photo_id,
-        }
-    }
-}
-
-/// The latest `triage_results` row for a sighting, as returned to clients.
-/// `candidate_species`/`missing_info` are parsed from the stored JSON TEXT
-/// columns into real JSON (never a doubly-escaped string).
-#[derive(Debug, Clone, Serialize)]
-pub struct TriageResultView {
-    pub id: String,
-    pub sighting_id: String,
-    pub created_at: String,
-    pub model: String,
-    pub status: String,
-    pub genus: Option<String>,
-    pub candidate_species: serde_json::Value,
-    pub missing_info: serde_json::Value,
-    pub reasoning: String,
-    pub photos_considered: i64,
-}
-
-#[derive(sqlx::FromRow)]
-struct TriageResultRow {
-    id: String,
-    sighting_id: String,
-    created_at: String,
-    model: String,
-    status: String,
-    genus: Option<String>,
-    candidate_species_json: String,
-    missing_info_json: String,
-    reasoning: String,
-    photos_considered: i64,
-}
-
-impl From<TriageResultRow> for TriageResultView {
-    fn from(row: TriageResultRow) -> Self {
-        TriageResultView {
-            candidate_species: parse_json_or_empty_array(&row.candidate_species_json),
-            missing_info: parse_json_or_empty_array(&row.missing_info_json),
-            id: row.id,
-            sighting_id: row.sighting_id,
-            created_at: row.created_at,
-            model: row.model,
-            status: row.status,
-            genus: row.genus,
-            reasoning: row.reasoning,
-            photos_considered: row.photos_considered,
-        }
-    }
-}
-
-/// The latest `deepdive_results` row for a sighting, as returned to
-/// clients. `confusants` is parsed from the stored JSON TEXT column.
-#[derive(Debug, Clone, Serialize)]
-pub struct DeepDiveResultView {
-    pub id: String,
-    pub sighting_id: String,
-    pub created_at: String,
-    pub model: String,
-    pub best_match_species: String,
-    pub confidence: f64,
-    pub wikipedia_title: Option<String>,
-    pub wikipedia_url: Option<String>,
-    pub wikipedia_extract: Option<String>,
-    pub confusants: serde_json::Value,
-    pub safety_notes: String,
-}
-
-#[derive(sqlx::FromRow)]
-struct DeepDiveResultRow {
-    id: String,
-    sighting_id: String,
-    created_at: String,
-    model: String,
-    best_match_species: String,
-    confidence: f64,
-    wikipedia_title: Option<String>,
-    wikipedia_url: Option<String>,
-    wikipedia_extract: Option<String>,
-    confusants_json: String,
-    safety_notes: String,
-}
-
-impl From<DeepDiveResultRow> for DeepDiveResultView {
-    fn from(row: DeepDiveResultRow) -> Self {
-        DeepDiveResultView {
-            confusants: parse_json_or_empty_array(&row.confusants_json),
-            id: row.id,
-            sighting_id: row.sighting_id,
-            created_at: row.created_at,
-            model: row.model,
-            best_match_species: row.best_match_species,
-            confidence: row.confidence,
-            wikipedia_title: row.wikipedia_title,
-            wikipedia_url: row.wikipedia_url,
-            wikipedia_extract: row.wikipedia_extract,
-            safety_notes: row.safety_notes,
         }
     }
 }
@@ -277,8 +192,7 @@ impl From<DeepDiveResultRow> for DeepDiveResultView {
 pub struct SightingDetail {
     pub sighting: Sighting,
     pub photos: Vec<PhotoView>,
-    pub triage: Option<TriageResultView>,
-    pub deepdive: Option<DeepDiveResultView>,
+    pub identification: Option<IdentificationResultDto>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -315,14 +229,6 @@ fn now_rfc3339() -> AppResult<String> {
 /// Normalize an optional free-text field: trim, and treat empty as absent.
 fn normalize(s: Option<String>) -> Option<String> {
     s.map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
-}
-
-/// Parse a JSON-array TEXT column into real `serde_json::Value`. Falls back
-/// to an empty array on malformed/missing data rather than failing the
-/// whole aggregate response — a sibling module's write bug shouldn't 500 the
-/// sighting detail screen.
-fn parse_json_or_empty_array(raw: &str) -> serde_json::Value {
-    serde_json::from_str(raw).unwrap_or_else(|_| serde_json::Value::Array(Vec::new()))
 }
 
 const SIGHTING_COLUMNS: &str = "id, user_id, status, lat, lon, location_accuracy_m, \
@@ -394,22 +300,16 @@ async fn insert_sighting(
 }
 
 /// List a user's sightings, newest first, each with a cheap summary (latest
-/// triage status/genus, photo count, a thumbnail photo id) computed via
-/// correlated subqueries against `triage_results` and `photos` in the same
-/// query.
+/// identification status/top species/danger level, photo count, a
+/// thumbnail photo id) computed via correlated subqueries against
+/// `identification_results` and `photos` in the same query.
 async fn list_sightings_for(pool: &SqlitePool, user_id: &str) -> AppResult<Vec<SightingSummary>> {
     let rows = sqlx::query_as::<_, SightingSummaryRow>(
         "SELECT s.id, s.created_at, s.observed_at, s.place_label, s.lat, s.lon, s.status, \
-                (SELECT t.status FROM triage_results t \
-                   WHERE t.sighting_id = s.id ORDER BY t.created_at DESC LIMIT 1) AS latest_triage_status, \
-                (SELECT t.genus FROM triage_results t \
-                   WHERE t.sighting_id = s.id ORDER BY t.created_at DESC LIMIT 1) AS latest_triage_genus, \
-                (SELECT t.candidate_species_json FROM triage_results t \
-                   WHERE t.sighting_id = s.id ORDER BY t.created_at DESC LIMIT 1) AS latest_triage_candidate_species_json, \
-                (SELECT d.best_match_species FROM deepdive_results d \
-                   WHERE d.sighting_id = s.id ORDER BY d.created_at DESC LIMIT 1) AS latest_deepdive_best_match_species, \
-                (SELECT d.confusants_json FROM deepdive_results d \
-                   WHERE d.sighting_id = s.id ORDER BY d.created_at DESC LIMIT 1) AS latest_deepdive_confusants_json, \
+                (SELECT i.status FROM identification_results i \
+                   WHERE i.sighting_id = s.id ORDER BY i.created_at DESC LIMIT 1) AS latest_identification_status, \
+                (SELECT i.candidates_json FROM identification_results i \
+                   WHERE i.sighting_id = s.id ORDER BY i.created_at DESC LIMIT 1) AS latest_identification_candidates_json, \
                 (SELECT COUNT(*) FROM photos p WHERE p.sighting_id = s.id) AS photo_count, \
                 (SELECT p.id FROM photos p \
                    WHERE p.sighting_id = s.id ORDER BY p.sort_order ASC LIMIT 1) AS thumbnail_photo_id \
@@ -425,38 +325,6 @@ async fn list_sightings_for(pool: &SqlitePool, user_id: &str) -> AppResult<Vec<S
     Ok(rows.into_iter().map(SightingSummary::from).collect())
 }
 
-async fn latest_triage(
-    pool: &SqlitePool,
-    sighting_id: &str,
-) -> AppResult<Option<TriageResultView>> {
-    let row = sqlx::query_as::<_, TriageResultRow>(
-        "SELECT id, sighting_id, created_at, model, status, genus, candidate_species_json, \
-                missing_info_json, reasoning, photos_considered \
-         FROM triage_results WHERE sighting_id = ? ORDER BY created_at DESC LIMIT 1",
-    )
-    .bind(sighting_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| AppError::Internal(e.into()))?;
-    Ok(row.map(TriageResultView::from))
-}
-
-async fn latest_deepdive(
-    pool: &SqlitePool,
-    sighting_id: &str,
-) -> AppResult<Option<DeepDiveResultView>> {
-    let row = sqlx::query_as::<_, DeepDiveResultRow>(
-        "SELECT id, sighting_id, created_at, model, best_match_species, confidence, \
-                wikipedia_title, wikipedia_url, wikipedia_extract, confusants_json, safety_notes \
-         FROM deepdive_results WHERE sighting_id = ? ORDER BY created_at DESC LIMIT 1",
-    )
-    .bind(sighting_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| AppError::Internal(e.into()))?;
-    Ok(row.map(DeepDiveResultView::from))
-}
-
 /// Build the full aggregate detail view for a sighting, scoped to `user_id`.
 async fn build_sighting_detail(
     pool: &SqlitePool,
@@ -465,13 +333,11 @@ async fn build_sighting_detail(
 ) -> AppResult<SightingDetail> {
     let sighting = owned_sighting(pool, user_id, id).await?;
     let photos = crate::photos::list_for_sighting(pool, id).await?;
-    let triage = latest_triage(pool, id).await?;
-    let deepdive = latest_deepdive(pool, id).await?;
+    let identification = crate::identification::get_latest(pool, id).await?;
     Ok(SightingDetail {
         sighting,
         photos,
-        triage,
-        deepdive,
+        identification,
     })
 }
 
@@ -571,8 +437,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn top_candidate_species_picks_highest_confidence() {
-        let json = r#"[{"species":"Agaricus bisporus","confidence":0.3},{"species":"Amanita phalloides","confidence":0.9}]"#;
+    fn top_candidate_species_picks_the_first_entry() {
+        // Candidates are already confidence-sorted (descending) by
+        // `identification::compile_candidates` before being persisted, so
+        // the first array entry is the top one.
+        let json = r#"[{"species":"Amanita phalloides","confidence":0.9},{"species":"Agaricus bisporus","confidence":0.3}]"#;
         assert_eq!(
             top_candidate_species(Some(json)),
             Some("Amanita phalloides".to_string())
@@ -587,19 +456,22 @@ mod tests {
     }
 
     #[test]
-    fn highest_confusant_danger_picks_most_severe() {
-        let json = r#"[{"danger_level":"caution"},{"danger_level":"deadly_toxic"},{"danger_level":"safe"}]"#;
+    fn highest_danger_level_picks_most_severe_across_poisonous_and_confusants() {
+        let json = r#"[
+            {"species":"A","poisonous":false,"confusants":[{"danger_level":"mild"}]},
+            {"species":"B","poisonous":true,"confusants":[{"danger_level":"deadly_toxic"}]}
+        ]"#;
         assert_eq!(
-            highest_confusant_danger(Some(json)),
+            highest_danger_level(Some(json)),
             Some("deadly_toxic".to_string())
         );
     }
 
     #[test]
-    fn highest_confusant_danger_handles_missing_or_invalid() {
-        assert_eq!(highest_confusant_danger(None), None);
-        assert_eq!(highest_confusant_danger(Some("not json")), None);
-        assert_eq!(highest_confusant_danger(Some("[]")), None);
+    fn highest_danger_level_handles_missing_or_invalid() {
+        assert_eq!(highest_danger_level(None), None);
+        assert_eq!(highest_danger_level(Some("not json")), None);
+        assert_eq!(highest_danger_level(Some("[]")), None);
     }
 
     async fn test_pool() -> (tempfile::TempDir, SqlitePool) {
@@ -617,47 +489,29 @@ mod tests {
         (dir, pool)
     }
 
-    /// `triage_results` / `deepdive_results` are owned by sibling agents and
-    /// may not have landed as migration files yet; create minimal copies
-    /// matching the schema frozen in `docs/ARCHITECTURE.md` so the detail
-    /// aggregate can be exercised against real tables now.
-    async fn create_sibling_tables(pool: &SqlitePool) {
+    /// Inserts a minimal `identification_results` row directly (bypassing
+    /// the real pipeline, which needs an LLM) so the list/detail aggregates
+    /// can be exercised against the real table.
+    async fn insert_identification_result(
+        pool: &SqlitePool,
+        sighting_id: &str,
+        status: &str,
+        candidates_json: &str,
+    ) {
         sqlx::query(
-            "CREATE TABLE IF NOT EXISTS triage_results ( \
-                id TEXT PRIMARY KEY, \
-                sighting_id TEXT NOT NULL, \
-                created_at TEXT NOT NULL, \
-                model TEXT NOT NULL, \
-                status TEXT NOT NULL, \
-                genus TEXT, \
-                candidate_species_json TEXT NOT NULL, \
-                missing_info_json TEXT NOT NULL, \
-                reasoning TEXT NOT NULL, \
-                photos_considered INTEGER NOT NULL \
-            )",
+            "INSERT INTO identification_results \
+                 (id, sighting_id, created_at, updated_at, status, model, candidates_json, \
+                  missing_info_json, photos_considered) \
+             VALUES (?, ?, '2026-03-01T10:06:00Z', '2026-03-01T10:06:00Z', ?, 'test-model', ?, \
+                      '[]', 1)",
         )
+        .bind(Uuid::new_v4().to_string())
+        .bind(sighting_id)
+        .bind(status)
+        .bind(candidates_json)
         .execute(pool)
         .await
-        .expect("create triage_results");
-
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS deepdive_results ( \
-                id TEXT PRIMARY KEY, \
-                sighting_id TEXT NOT NULL, \
-                created_at TEXT NOT NULL, \
-                model TEXT NOT NULL, \
-                best_match_species TEXT NOT NULL, \
-                confidence REAL NOT NULL, \
-                wikipedia_title TEXT, \
-                wikipedia_url TEXT, \
-                wikipedia_extract TEXT, \
-                confusants_json TEXT NOT NULL, \
-                safety_notes TEXT NOT NULL \
-            )",
-        )
-        .execute(pool)
-        .await
-        .expect("create deepdive_results");
+        .expect("insert identification_results row");
     }
 
     #[tokio::test]
@@ -804,7 +658,6 @@ mod tests {
     #[tokio::test]
     async fn list_orders_newest_first_and_reports_photo_count() {
         let (_dir, pool) = test_pool().await;
-        create_sibling_tables(&pool).await;
 
         let first = insert_sighting(
             &pool,
@@ -870,9 +723,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn detail_aggregates_photos_triage_and_deepdive() {
+    async fn detail_aggregates_photos_and_identification() {
         let (_dir, pool) = test_pool().await;
-        create_sibling_tables(&pool).await;
 
         let sighting = insert_sighting(
             &pool,
@@ -887,14 +739,13 @@ mod tests {
         .await
         .expect("insert sighting");
 
-        // Before any photo/triage/deepdive: detail still succeeds, with
-        // empty photos and no triage/deepdive.
+        // Before any photo/identification: detail still succeeds, with
+        // empty photos and no identification.
         let empty_detail = build_sighting_detail(&pool, "u1", &sighting.id)
             .await
             .expect("detail before any photo");
         assert!(empty_detail.photos.is_empty());
-        assert!(empty_detail.triage.is_none());
-        assert!(empty_detail.deepdive.is_none());
+        assert!(empty_detail.identification.is_none());
 
         sqlx::query(
             "INSERT INTO photos (id, sighting_id, file_path, content_type, width, height, \
@@ -906,46 +757,29 @@ mod tests {
         .await
         .expect("insert photo");
 
-        sqlx::query(
-            "INSERT INTO triage_results \
-                 (id, sighting_id, created_at, model, status, genus, candidate_species_json, \
-                  missing_info_json, reasoning, photos_considered) \
-             VALUES ('t1', ?, '2026-03-01T10:06:00Z', 'test-model', 'genus_candidate', 'Amanita', \
-                      '[{\"species\":\"Amanita phalloides\",\"common_name\":\"Death cap\",\"confidence\":0.6}]', \
-                      '[]', 'looks like Amanita', 1)",
+        insert_identification_result(
+            &pool,
+            &sighting.id,
+            "complete",
+            r#"[{"species":"Amanita phalloides","common_name":"Death cap","confidence":0.6,
+                "edible":false,"medicinal":null,"psychoactive":null,"poisonous":true,
+                "wikipedia_url":"https://en.wikipedia.org/wiki/Amanita_phalloides",
+                "risk_note":"deadly","confusants":[]}]"#,
         )
-        .bind(&sighting.id)
-        .execute(&pool)
-        .await
-        .expect("insert triage");
-
-        sqlx::query(
-            "INSERT INTO deepdive_results \
-                 (id, sighting_id, created_at, model, best_match_species, confidence, \
-                  wikipedia_title, wikipedia_url, wikipedia_extract, confusants_json, safety_notes) \
-             VALUES ('d1', ?, '2026-03-01T10:10:00Z', 'test-model', 'Amanita phalloides', 0.6, \
-                      'Amanita phalloides', 'https://en.wikipedia.org/wiki/Amanita_phalloides', \
-                      'A deadly poisonous mushroom.', '[]', 'Never eat anything based on this app alone.')",
-        )
-        .bind(&sighting.id)
-        .execute(&pool)
-        .await
-        .expect("insert deepdive");
+        .await;
 
         let detail = build_sighting_detail(&pool, "u1", &sighting.id)
             .await
             .expect("full detail");
         assert_eq!(detail.photos.len(), 1);
-        let triage = detail.triage.expect("triage present");
-        assert_eq!(triage.status, "genus_candidate");
-        assert_eq!(triage.genus.as_deref(), Some("Amanita"));
-        assert!(triage.candidate_species.is_array());
+        let identification = detail.identification.expect("identification present");
         assert_eq!(
-            triage.candidate_species.as_array().map(|a| a.len()),
-            Some(1)
+            identification.status,
+            crate::identification::IdentificationStatus::Complete
         );
-        let deepdive = detail.deepdive.expect("deepdive present");
-        assert_eq!(deepdive.best_match_species, "Amanita phalloides");
+        assert_eq!(identification.candidates.len(), 1);
+        assert_eq!(identification.candidates[0].species, "Amanita phalloides");
+        assert_eq!(identification.candidates[0].poisonous, Some(true));
 
         // Another user cannot see it.
         let err = build_sighting_detail(&pool, "someone-else", &sighting.id)
@@ -967,7 +801,6 @@ mod tests {
     #[tokio::test]
     async fn detail_serializes_sighting_as_a_nested_object_not_flattened() {
         let (_dir, pool) = test_pool().await;
-        create_sibling_tables(&pool).await;
 
         let sighting = insert_sighting(
             &pool,
@@ -1001,19 +834,6 @@ mod tests {
             "sighting must be a nested object with its own fields"
         );
         assert!(value.get("photos").is_some());
-        assert!(value.get("triage").is_some());
-        assert!(value.get("deepdive").is_some());
-    }
-
-    #[test]
-    fn malformed_json_column_degrades_to_empty_array() {
-        assert_eq!(
-            parse_json_or_empty_array("not json"),
-            serde_json::Value::Array(Vec::new())
-        );
-        assert_eq!(
-            parse_json_or_empty_array("[1,2,3]"),
-            serde_json::json!([1, 2, 3])
-        );
+        assert!(value.get("identification").is_some());
     }
 }

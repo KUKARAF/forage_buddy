@@ -196,6 +196,14 @@ struct DesktopUrls {
 }
 
 /// `https://en.wikipedia.org/wiki/{title}`, percent-encoded via `Url`'s path
+/// segment API. Public so callers (e.g. `identification::gather_risks`) can
+/// construct a best-guess link for a species without a live fetch — see
+/// [`default_page_url`]'s own doc comment for when it's used internally.
+pub fn page_url(title: &str) -> String {
+    default_page_url(title)
+}
+
+/// `https://en.wikipedia.org/wiki/{title}`, percent-encoded via `Url`'s path
 /// segment API, used when the summary response has no `content_urls`.
 fn default_page_url(title: &str) -> String {
     match reqwest::Url::parse("https://en.wikipedia.org/wiki") {
